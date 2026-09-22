@@ -1,0 +1,20 @@
+# /etc/systemd/system/gunjin-server.service
+# 軍人将棋のゲームサーバー（Unity Dedicated Server・Linux x86_64）
+[Unit]
+Description=Gunjin Shogi game server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=gunjin
+Group=gunjin
+WorkingDirectory=/opt/gunjin-server
+ExecStart=/opt/gunjin-server/GunjinShogiServer.x86_64 -batchmode -nographics -port 7778 -logFile -
+Restart=always
+RestartSec=3
+# ターン制で負荷は小さいが、念のため上限を付けておく
+MemoryMax=512M
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

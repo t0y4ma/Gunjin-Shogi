@@ -169,3 +169,9 @@ Packages/packages-lock.json linguist-generated
 
 # Exceptions for .asset files such as lightning pre-baking
 LightingData.asset     binary
+
+# ---- 軍人将棋プロジェクト固有 ----
+# シェルスクリプトは Linux で動かすので改行を LF に固定する
+*.sh                    text eol=lf
+# WebGL ビルドは VM が git pull でそのまま配信するので、LFS を使わず普通のファイルとして持つ
+Builds/WebGL/**         -filter -diff -merge -text

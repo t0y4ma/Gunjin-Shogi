@@ -1,0 +1,14 @@
+{
+  "name": "GunjinShogi.Unity",
+  "rootNamespace": "GunjinShogi.UnityView",
+  "references": ["GunjinShogi.Core", "Unity.TextMeshPro", "UnityEngine.UI", "Unity.InputSystem", "Mirror", "Mirror.Transports", "SimpleWebTransport"],
+  "includePlatforms": [],
+  "excludePlatforms": [],
+  "allowUnsafeCode": false,
+  "overrideReferences": false,
+  "precompiledReferences": [],
+  "autoReferenced": true,
+  "defineConstraints": [],
+  "versionDefines": [],
+  "noEngineReferences": false
+}

@@ -1,0 +1,19 @@
+# 軍人将棋：既存の Caddyfile に追記するサイト設定
+# ・gunjin.example.com を自分のドメイン（サブドメイン推奨）に置き換える。DNS の A レコードを VM に向けておく
+# ・証明書は Caddy が自動で取得する（80/443 が外から届くこと）
+# ・同じホスト・同じ 443 番で「WebGL の配信」と「ゲームの WebSocket（wss）」を受ける。
+#   クライアントはページと同じホストへ wss で接続するので、Unity 側の設定変更は不要
+
+gunjin.example.com {
+	# WebSocket の接続だけをゲームサーバーへ渡す
+	@ws header Connection *Upgrade*
+	reverse_proxy @ws 127.0.0.1:7778
+
+	# それ以外は WebGL ビルドを配信（リポジトリを置いた場所に合わせる）
+	root * /srv/gunjin-shogi/Builds/WebGL
+	file_server
+
+	# 更新したクライアントがすぐ反映されるよう、入口の HTML はキャッシュさせない
+	@html path / /index.html
+	header @html Cache-Control "no-cache"
+}

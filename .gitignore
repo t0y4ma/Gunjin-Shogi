@@ -15,7 +15,9 @@
 /[Tt]emp/
 /[Oo]bj/
 /[Bb]uild/
-/[Bb]uilds/
+# ビルドは WebGL だけ追跡する（VM が git pull で取り込む）。サーバー本体と zip は含めない
+/[Bb]uilds/*
+!/[Bb]uilds/WebGL/
 /[Ll]ogs/
 /[Uu]ser[Ss]ettings/
 *.log
@@ -105,3 +107,13 @@ InitTestScene*.unity*
 
 # Auto-generated scenes by play mode tests
 /[Aa]ssets/[Ii]nit[Tt]est[Ss]cene*.unity*
+
+# ---- 軍人将棋プロジェクト固有 ----
+# UnityMCP のスクリーンショット（確認用）
+/[Aa]ssets/[Ss]creenshots/
+/[Aa]ssets/[Ss]creenshots.meta
+# CPU の強さ測定ツールの生成物（ソースと csproj は追跡する）
+/Tools/CpuArena/bin/
+/Tools/CpuArena/obj/
+/Tools/CpuArena/out*.txt
+!/Tools/CpuArena/CpuArena.csproj
