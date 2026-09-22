@@ -30,7 +30,9 @@ namespace GunjinShogi.UnityView
         public bool useWss;
         [Tooltip("クライアントが接続するポート。逆プロキシ越しなら 443。0 ならサーバーと同じ")]
         public ushort clientPort;
-        [Tooltip("WebGL ビルドでは、ページを配信しているホストへ接続する（https なら wss・同じポート）。逆プロキシが WebSocket をゲームサーバーへ振り分ける前提")]
+        [Tooltip("WebGL ビルドの接続先（パスまで含む）。Cloudflare Pages など別の場所から配信するときに使う。空ならページと同じホストへ接続する")]
+        public string serverUrl = "wss://nine.freeddns.org/gunjin";
+        [Tooltip("serverUrl が空のとき、WebGL ビルドではページを配信しているホストへ接続する（https なら wss・同じポート）")]
         public bool followPageHost = true;
 
         public static GunjinNetworkManager Instance => singleton as GunjinNetworkManager;
@@ -115,6 +117,13 @@ namespace GunjinShogi.UnityView
             if (NetworkClient.active) return;
             networkAddress = serverHost;
 #if UNITY_WEBGL && !UNITY_EDITOR
+            // 例: wss://nine.freeddns.org/gunjin（Caddy がパスで軍人将棋のサーバーへ振り分ける）
+            if (!string.IsNullOrEmpty(serverUrl) && Uri.TryCreate(serverUrl, UriKind.Absolute, out var url))
+            {
+                ConfigureTransport();
+                StartClient(url);
+                return;
+            }
             if (followPageHost) UsePageHost();
 #endif
             ConfigureTransport();

@@ -10,8 +10,8 @@ namespace GunjinShogi.EditorTools
 {
     /// <summary>
     /// 配布用ビルド。メニュー「軍人将棋/ビルド」から実行する。
-    /// ・サーバー：Linux 専用サーバー（.x86_64、Dedicated Server サブターゲット）→ Builds/Server と転送用の Builds/GunjinShogiServer.zip
-    /// ・クライアント：WebGL → Builds/WebGL（リポジトリで追跡し、VM は git pull で取り込む）
+    /// ・サーバー：Linux 専用サーバー（.x86_64、Dedicated Server サブターゲット、IL2CPP）→ Builds/Server と転送用の Builds/GunjinShogiServer.zip
+    /// ・クライアント：WebGL → Builds/WebGL（リポジトリで追跡し、Cloudflare Pages が push のたびに公開する）
     /// 配置の手順は Deploy/README.md。サーバーとクライアントは同じ版を一緒に配置する。
     /// </summary>
     public static class GunjinBuild
@@ -36,8 +36,8 @@ namespace GunjinShogi.EditorTools
         /// <summary>ビルドして、最後に作業ターゲットを元に戻す。結果は Library/GunjinBuild/last-result.txt にも書く。</summary>
         public static bool Run(bool server, bool web)
         {
-            var originalGroup = EditorUserBuildSettings.selectedBuildTargetGroup;
-            var originalTarget = EditorUserBuildSettings.activeBuildTarget;
+            // Linux の IL2CPP ビルドの前に作業ターゲットを Linux にしておくことがあるので、終わったら Windows に戻す
+            var restoreTarget = BuildTarget.StandaloneWindows64;
             var log = new System.Text.StringBuilder();
             bool ok = true;
             try
@@ -54,8 +54,8 @@ namespace GunjinShogi.EditorTools
             {
                 // Server のままだとエディタ内でも Mirror がヘッドレス扱いになり、再生すると勝手にサーバーが立つ
                 EditorUserBuildSettings.standaloneBuildSubtarget = StandaloneBuildSubtarget.Player;
-                if (EditorUserBuildSettings.activeBuildTarget != originalTarget)
-                    EditorUserBuildSettings.SwitchActiveBuildTarget(BuildPipeline.GetBuildTargetGroup(originalTarget), originalTarget);
+                if (EditorUserBuildSettings.activeBuildTarget != restoreTarget)
+                    EditorUserBuildSettings.SwitchActiveBuildTarget(BuildTargetGroup.Standalone, restoreTarget);
             }
             log.Insert(0, (ok ? "成功" : "失敗") + $"  {DateTime.Now:yyyy-MM-dd HH:mm:ss}\n");
             Directory.CreateDirectory(Path.GetDirectoryName(ResultFile));
@@ -71,6 +71,8 @@ namespace GunjinShogi.EditorTools
                 log.AppendLine("サーバー: Linux のビルドモジュールがありません（Unity Hub で Linux Dedicated Server Build Support を追加）");
                 return false;
             }
+            // Unity 6 の Linux サーバーは Mono だと起動後に落ちることがあるため IL2CPP にする（Nine の運用で確認済み）
+            PlayerSettings.SetScriptingBackend(UnityEditor.Build.NamedBuildTarget.Server, ScriptingImplementation.IL2CPP);
             if (Directory.Exists(ServerDir)) Directory.Delete(ServerDir, true);
             var report = BuildPipeline.BuildPlayer(new BuildPlayerOptions
             {

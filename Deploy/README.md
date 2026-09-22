@@ -1,121 +1,156 @@
-# 軍人将棋 オンライン対戦の配置手順（Caddy の入った Linux VM）
+# 軍人将棋 オンライン対戦の配置手順（Nine の VM に追加する）
+
+軍人将棋のサーバーは、Nine と同じ GCP の VM（e2-micro・`nine.freeddns.org`）に**追加**します。Nine の設定・ファイル・サービスはそのまま残ります。
+WebGL クライアントは、Nine と同じく Cloudflare Pages から配信します。VM からは配りません（GCP の無料枠は外向きの通信量が小さく、約 30MB のゲームを VM から配るとすぐ使い切ってしまうため）。
 
 ## 全体の形
 
 ```
-ブラウザ ──https / wss (443)──▶ Caddy ─┬─ WebGL のファイル（/srv/gunjin-shogi/Builds/WebGL）
-                                        └─ WebSocket だけ ──▶ 127.0.0.1:7778 ゲームサーバー（systemd）
+ブラウザ（Cloudflare Pages から WebGL を読み込む）
+   │  wss://nine.freeddns.org/gunjin
+   ▼
+Caddy（VM・TLS 終端）
+   ├─ /gunjin で始まる接続 ──▶ 127.0.0.1:7778   軍人将棋サーバー（gunjin-server.service・~/gunjin）
+   └─ それ以外（今までどおり）──▶ 127.0.0.1:27777  Nine サーバー（nine-server.service・~/game2）
 ```
 
-- クライアントは、ページを開いたホストと同じ場所へ `wss://` で接続します（Unity 側の設定変更は不要）。
-- ゲームサーバーの 7778 番は Caddy からだけ使うので、外には開けません。
-- サーバーとクライアントは同じ版を一緒に置いてください。版が違うと「サーバーとゲームのバージョンが違います」と表示され接続できません。
+| | Nine | 軍人将棋 |
+|---|---|---|
+| systemd のサービス | `nine-server` | `gunjin-server` |
+| 置き場所 | `~/game2` | `~/gunjin` |
+| ポート（VM の中だけ） | 27777 | 7778 |
+| 接続先 | `wss://nine.freeddns.org` | `wss://nine.freeddns.org/gunjin` |
+| WebGL | `https://nine-mja.pages.dev` | Cloudflare Pages（このリポジトリの `Builds/WebGL`） |
 
-## 用意するもの
+外に開けるポートは今までどおり 80 / 443 / 22 だけです。GCP のファイアウォールの変更は要りません（7778 は開けないでください）。
 
-| もの | 場所 |
-|---|---|
-| サーバー本体 | Windows の `Builds/GunjinShogiServer.zip`（リポジトリには含めません。VM へ転送します） |
-| WebGL クライアント | リポジトリの `Builds/WebGL/` |
-| Caddy の設定 | `Deploy/Caddyfile.gunjin` |
-| サーバーの常駐設定 | `Deploy/gunjin-server.service` |
-| 更新用スクリプト | `Deploy/update-server.sh`・`Deploy/update-web.sh` |
+## 1. WebGL を Cloudflare Pages に登録する（初回のみ）
 
-## 初回の配置
+1. Cloudflare のダッシュボード →「Workers & Pages」→「作成」→「Pages」→「Git に接続」
+2. リポジトリ `t0y4ma/Gunjin-Shogi` を選ぶ
+3. ビルドの設定
+   - フレームワークのプリセット：なし
+   - ビルドコマンド：空欄（ビルド済みのファイルをそのまま公開する）
+   - ビルド出力ディレクトリ：`Builds/WebGL`
+4. 保存すると公開されます（例 `https://gunjin-shogi.pages.dev`）。以後は **GitHub に push するたびに自動で更新**されます。
 
-以下は Ubuntu / Debian の例です。`gunjin.example.com` は自分のドメインに置き換えてください（サブドメインを1つ割り当てるのが簡単です。DNS の A レコードを VM に向けておきます）。
+## 2. ゲームサーバーを VM に追加する（初回）
 
-### 1. サーバー用のユーザーと必要なパッケージ
+Windows 側の `Builds/GunjinShogiServer.zip`（ビルドスクリプトが作ります）を使います。
 
-```bash
-sudo useradd --system --no-create-home --shell /usr/sbin/nologin gunjin
-sudo apt-get update && sudo apt-get install -y unzip git
-```
-
-### 2. WebGL（リポジトリから必要なフォルダだけ取得）
-
-```bash
-sudo mkdir -p /srv && cd /srv
-sudo git clone --filter=blob:none --sparse https://github.com/t0y4ma/Gunjin-Shogi.git gunjin-shogi
-cd gunjin-shogi
-sudo git sparse-checkout set Builds/WebGL Deploy
-sudo chmod +x Deploy/*.sh
-```
-
-リポジトリが非公開の場合は、GitHub の Deploy key（読み取り専用）か、読み取り権限だけのトークンで clone してください。
-
-### 3. ゲームサーバー
-
-Windows 側で zip を VM に送ります（PowerShell など）。
+1. GCP コンソールの VM インスタンス一覧から、該当インスタンスの「SSH」を開く
+2. 右上の歯車 →「ファイルをアップロード」で `GunjinShogiServer.zip` をアップロード（ホームディレクトリ `~` に置かれる）
+3. ターミナルで次を実行
 
 ```bash
-scp Builds/GunjinShogiServer.zip ユーザー名@VMのアドレス:/tmp/
-```
+# 置き場所を作って展開
+mkdir -p ~/gunjin
+unzip -o ~/GunjinShogiServer.zip -d ~/gunjin
+chmod -R +rX ~/gunjin
+chmod +x ~/gunjin/GunjinShogiServer.x86_64
 
-VM で配置して常駐させます。
+# サービスを登録（Nine の nine-server とは別のサービス）
+sudo tee /etc/systemd/system/gunjin-server.service > /dev/null << 'EOF'
+[Unit]
+Description=Gunjin Shogi Game Server
+After=network.target
 
-```bash
-sudo cp /srv/gunjin-shogi/Deploy/gunjin-server.service /etc/systemd/system/
+[Service]
+Type=simple
+User=toyama_family_from2006
+WorkingDirectory=/home/toyama_family_from2006/gunjin
+ExecStart=/home/toyama_family_from2006/gunjin/GunjinShogiServer.x86_64 -batchmode -nographics -port 7778 -logFile -
+Restart=always
+RestartSec=5
+MemoryMax=400M
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
 sudo systemctl daemon-reload
-sudo systemctl enable gunjin-server
-sudo /srv/gunjin-shogi/Deploy/update-server.sh /tmp/GunjinShogiServer.zip
+sudo systemctl enable --now gunjin-server
+sudo systemctl status gunjin-server   # active (running) なら成功
 ```
 
-ログに `[Gunjin] サーバー起動 ポート 7778` が出れば動いています。
+ログに `[Gunjin] サーバー起動 ポート 7778` が出ていれば動いています。
 
 ```bash
-journalctl -u gunjin-server -f
+sudo journalctl -u gunjin-server -f
 ```
 
-### 4. Caddy
+（同じ内容の service ファイルは `Deploy/gunjin-server.service` にもあります）
 
-`Deploy/Caddyfile.gunjin` の中身を、既存の Caddyfile（通常 `/etc/caddy/Caddyfile`）に追記し、ドメインを書き換えてから再読み込みします。
+## 3. Caddy に振り分けを追加する（初回）
+
+`/etc/caddy/Caddyfile` の `nine.freeddns.org { ... }` を、`Deploy/Caddyfile.gunjin` の内容に書き換えます。Nine 向けの `reverse_proxy 127.0.0.1:27777` は `handle { ... }` の中にそのまま残ります。
 
 ```bash
-sudo caddy validate --config /etc/caddy/Caddyfile
+sudo cp /etc/caddy/Caddyfile /etc/caddy/Caddyfile.bak   # 念のため控えを取る
+sudo nano /etc/caddy/Caddyfile                          # 書き換える
+sudo caddy validate --config /etc/caddy/Caddyfile       # 書式の確認
 sudo systemctl reload caddy
 ```
 
-### 5. ファイアウォール
+書き換え後の形：
 
-80 / 443 だけを開け、7778 は開けません（ufw の例）。
+```
+nine.freeddns.org {
+	handle /gunjin* {
+		reverse_proxy 127.0.0.1:7778 {
+			stream_timeout 1h
+			stream_close_delay 30s
+		}
+	}
 
-```bash
-sudo ufw allow 80,443/tcp
-sudo ufw deny 7778/tcp
+	handle {
+		reverse_proxy 127.0.0.1:27777 {
+			stream_timeout 1h
+			stream_close_delay 30s
+		}
+	}
+}
 ```
 
-クラウドのセキュリティグループ（VM の外側のファイアウォール）がある場合も同様にします。
+うまくいかなければ `sudo cp /etc/caddy/Caddyfile.bak /etc/caddy/Caddyfile && sudo systemctl reload caddy` で元に戻せます。
 
-### 6. 確認
+## 4. 確認
 
-1. `https://gunjin.example.com` を開き、タイトルが表示される。
-2. 「オンライン対戦」を開くと「サーバーに接続しています（gunjin.example.com）」と出る。
-3. 2つのブラウザ（片方はシークレットウィンドウなど）で、部屋を作る → 部屋番号で入る → 対局できる。
-4. 「招待」で出るリンクを別のブラウザで開くと、その部屋に直接入れる。
+1. **Nine が今までどおり動くこと**（`https://nine-mja.pages.dev` で部屋を作れる）
+2. 軍人将棋の Pages の URL を開き、「オンライン対戦」で「サーバーに接続しています（nine.freeddns.org）」と出る
+3. 2つのブラウザ（片方はシークレットウィンドウなど）で、部屋を作る → 部屋番号で入る → 対局できる
+4. 「招待」でコピーしたリンクを別のブラウザで開くと、その部屋に直接入れる
+5. メモリに余裕があるか：`free -h`（e2-micro は 1GB。足りなければスワップの追加を検討）
 
 ## 更新するとき
 
-通信の中身が変わった版では、**サーバーと WebGL を必ず一緒に**更新してください。
+WebGL は push すれば Pages が自動で更新しますが、**サーバーは自動では更新されません**。通信の中身が変わった版では、**サーバーと WebGL を必ず一緒に**更新してください（版が違うと「サーバーとゲームのバージョンが違います」と出て接続できません）。
+
+1. Unity でビルド（メニュー「軍人将棋 → ビルド → 両方」）→ GitHub に push（WebGL が更新される）
+2. `GunjinShogiServer.zip` を GCP の SSH でアップロードして、次を実行
 
 ```bash
-# WebGL（リポジトリに push 済みの最新を取り込む）
-sudo /srv/gunjin-shogi/Deploy/update-web.sh
-# サーバー（新しい zip を /tmp に送ってから）
-sudo /srv/gunjin-shogi/Deploy/update-server.sh /tmp/GunjinShogiServer.zip
+sudo systemctl stop gunjin-server
+rm -rf ~/gunjin && mkdir -p ~/gunjin
+unzip -o ~/GunjinShogiServer.zip -d ~/gunjin
+chmod -R +rX ~/gunjin
+chmod +x ~/gunjin/GunjinShogiServer.x86_64
+sudo systemctl start gunjin-server
+sudo systemctl status gunjin-server
 ```
 
-サーバーを再起動すると、進行中の部屋はすべて消えます（プレイヤーには「部屋がなくなりました」と表示されます）。人の少ない時間に行ってください。
+軍人将棋のサーバーを再起動しても、Nine には影響しません。軍人将棋の進行中の部屋は消えます（プレイヤーには「部屋がなくなりました」と表示されます）。
 
 ## うまくいかないとき
 
 | 症状 | 確認すること |
 |---|---|
-| ページは出るが「サーバーにつながっていません」 | `systemctl status gunjin-server`、Caddyfile の `reverse_proxy @ws 127.0.0.1:7778` |
-| ページが真っ白・読み込みが止まる | ブラウザの開発者ツールのコンソール。`Builds/WebGL` の中身がそろっているか |
+| 軍人将棋で「サーバーにつながっていません」 | `sudo systemctl status gunjin-server`、Caddyfile の `handle /gunjin*` |
+| Nine がつながらなくなった | Caddyfile の `handle { reverse_proxy 127.0.0.1:27777 ... }` が残っているか。控えから戻す |
 | 「バージョンが違います」 | サーバーと WebGL の片方だけ更新していないか |
-| サーバーがすぐ落ちる | `journalctl -u gunjin-server -n 100`。zip の展開先と実行権限（`chmod +x`） |
+| サーバーがすぐ落ちる | `sudo journalctl -u gunjin-server -n 100`。実行権限（`chmod +x`）、メモリ（`free -h`） |
+| ページが真っ白・読み込みが止まる | Pages のビルド出力ディレクトリが `Builds/WebGL` になっているか |
 
 ## 通信量の目安
 
-1手あたり、送信は約 7 バイト、受信は 12〜17 バイト（Mirror と WebSocket の枠組み分は別）です。1局 150 手でも数 KB 程度に収まります。
+1手あたり、送信は約 7 バイト、受信は 12〜17 バイト（Mirror と WebSocket の枠組み分は別）です。1局 150 手でも数 KB 程度で、VM の通信量にはほとんど影響しません。

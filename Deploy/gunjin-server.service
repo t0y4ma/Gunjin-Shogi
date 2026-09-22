@@ -1,20 +1,19 @@
 # /etc/systemd/system/gunjin-server.service
-# 軍人将棋のゲームサーバー（Unity Dedicated Server・Linux x86_64）
+# 軍人将棋のゲームサーバー（Unity Dedicated Server・Linux x86_64・IL2CPP）
+# Nine（nine-server.service・~/game2・27777番）と同じ VM で、別のサービス・別のフォルダ・別のポートとして動かす
 [Unit]
-Description=Gunjin Shogi game server
-After=network-online.target
-Wants=network-online.target
+Description=Gunjin Shogi Game Server
+After=network.target
 
 [Service]
-User=gunjin
-Group=gunjin
-WorkingDirectory=/opt/gunjin-server
-ExecStart=/opt/gunjin-server/GunjinShogiServer.x86_64 -batchmode -nographics -port 7778 -logFile -
+Type=simple
+User=toyama_family_from2006
+WorkingDirectory=/home/toyama_family_from2006/gunjin
+ExecStart=/home/toyama_family_from2006/gunjin/GunjinShogiServer.x86_64 -batchmode -nographics -port 7778 -logFile -
 Restart=always
-RestartSec=3
-# ターン制で負荷は小さいが、念のため上限を付けておく
-MemoryMax=512M
-NoNewPrivileges=true
+RestartSec=5
+# e2-micro（メモリ 1GB）で Nine と同居するので、使いすぎたら止めて再起動させる
+MemoryMax=400M
 
 [Install]
 WantedBy=multi-user.target
