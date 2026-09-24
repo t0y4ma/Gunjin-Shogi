@@ -148,6 +148,7 @@ sudo systemctl status gunjin-server
 | 軍人将棋で「サーバーにつながっていません」 | `sudo systemctl status gunjin-server`、Caddyfile の `handle /gunjin*` |
 | Nine がつながらなくなった | Caddyfile の `handle { reverse_proxy 127.0.0.1:27777 ... }` が残っているか。控えから戻す |
 | 「バージョンが違います」 | サーバーと WebGL の片方だけ更新していないか |
+| `status=203/EXEC` で再起動を繰り返す | 実行ファイルを起動できていない。`ls -l ~/gunjin/GunjinShogiServer.x86_64` で `-rwx` になっているか（`chmod +x` を忘れていないか）、`~/gunjin` の直下に展開されているか |
 | サーバーがすぐ落ちる | `sudo journalctl -u gunjin-server -n 100`。実行権限（`chmod +x`）、メモリ（`free -h`） |
 | ページが真っ白・読み込みが止まる | Pages のビルド出力ディレクトリが `Builds/WebGL` になっているか |
 

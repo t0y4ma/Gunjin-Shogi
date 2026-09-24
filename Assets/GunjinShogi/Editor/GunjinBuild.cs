@@ -92,7 +92,10 @@ namespace GunjinShogi.EditorTools
                 {
                     var rel = file.Substring(ServerDir.Length + 1).Replace('\\', '/');
                     if (rel.Contains("_DoNotShip") || rel.Contains("_BackUpThisFolder_ButDontShipItWithYourGame")) continue;
-                    zip.CreateEntryFromFile(file, rel, System.IO.Compression.CompressionLevel.Optimal);
+                    var entry = zip.CreateEntryFromFile(file, rel, System.IO.Compression.CompressionLevel.Optimal);
+                    // Linux で展開したときの権限（上位16ビットに Unix のモード）。実行ファイルと .so は 755、それ以外は 644
+                    bool exec = rel.EndsWith(".x86_64") || rel.EndsWith(".so") || rel.Contains(".so.");
+                    entry.ExternalAttributes = (exec ? 0x81ED : 0x81A4) << 16;
                 }
             }
             log.AppendLine($"  転送用 zip: {ServerZip}（{new FileInfo(ServerZip).Length / (1024f * 1024f):0.0} MB）");
