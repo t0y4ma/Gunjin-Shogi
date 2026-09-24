@@ -1,15 +1,16 @@
 # /etc/systemd/system/gunjin-server.service
 # 軍人将棋のゲームサーバー（Unity Dedicated Server・Linux x86_64・IL2CPP）
 # Nine（nine-server.service・~/game2・27777番）と同じ VM で、別のサービス・別のフォルダ・別のポートとして動かす
+# 通常は update-gunjin.sh が初回に自動で登録する。手で登録する場合は USERNAME を VM のユーザー名に置き換える
 [Unit]
 Description=Gunjin Shogi Game Server
 After=network.target
 
 [Service]
 Type=simple
-User=toyama_family_from2006
-WorkingDirectory=/home/toyama_family_from2006/gunjin
-ExecStart=/home/toyama_family_from2006/gunjin/GunjinShogiServer.x86_64 -batchmode -nographics -port 7778 -logFile -
+User=USERNAME
+WorkingDirectory=/home/USERNAME/gunjin
+ExecStart=/home/USERNAME/gunjin/GunjinShogiServer.x86_64 -batchmode -nographics -port 7778 -logFile -
 Restart=always
 RestartSec=5
 # e2-micro（メモリ 1GB）で Nine と同居するので、使いすぎたら止めて再起動させる
