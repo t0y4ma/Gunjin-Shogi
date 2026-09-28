@@ -69,6 +69,38 @@ namespace GunjinShogi.UnityView
             return t;
         }
 
+        /// <summary>
+        /// 1行テキストを「はみ出したら自動で流れる」表示にする。テキストのいた場所に窓（マスク）を入れ、テキストをその子にする。
+        /// レイアウトの大きさ（LayoutElement）は窓に移す。文字の大きさは max に固定。
+        /// </summary>
+        public static MarqueeText Marquee(TextMeshProUGUI t, float fontSize)
+        {
+            var tr = t.rectTransform;
+            var view = Rect(t.name + "View", tr.parent);
+            view.SetSiblingIndex(tr.GetSiblingIndex());
+            view.anchorMin = tr.anchorMin;
+            view.anchorMax = tr.anchorMax;
+            view.pivot = tr.pivot;
+            view.offsetMin = tr.offsetMin;
+            view.offsetMax = tr.offsetMax;
+            var src = t.GetComponent<LayoutElement>();
+            if (src != null)
+            {
+                var le = view.gameObject.AddComponent<LayoutElement>();
+                le.minWidth = src.minWidth; le.minHeight = src.minHeight;
+                le.preferredWidth = src.preferredWidth; le.preferredHeight = src.preferredHeight;
+                le.flexibleWidth = src.flexibleWidth; le.flexibleHeight = src.flexibleHeight;
+                le.ignoreLayout = src.ignoreLayout;
+                UnityEngine.Object.Destroy(src);
+            }
+            view.gameObject.AddComponent<RectMask2D>();
+            tr.SetParent(view, false);
+            t.fontSize = fontSize;
+            var m = view.gameObject.AddComponent<MarqueeText>();
+            m.Init(t);
+            return m;
+        }
+
         public static void AutoSize(TextMeshProUGUI t, float max)
         {
             t.enableAutoSizing = true;
@@ -110,6 +142,8 @@ namespace GunjinShogi.UnityView
             colors.colorMultiplier = 1.4f;
             button.colors = colors;
             if (onClick != null) button.onClick.AddListener(() => onClick());
+            // 押せないときは枠と文字も面と同じだけ暗くする
+            frame.gameObject.AddComponent<ButtonLook>().Init(button, frame, text);
             return button;
         }
 
@@ -174,6 +208,15 @@ namespace GunjinShogi.UnityView
             var content = Stretch(Rect("Content", card.transform), 36, 28, 36, 28);
             dim.gameObject.SetActive(false);
             return (dim.gameObject, content);
+        }
+
+        /// <summary>モーダルの外側（暗い覆い）をクリックしたら close を呼ぶ。close は「閉じる」ボタンと同じ処理を渡す。</summary>
+        public static void CloseOnBackdrop(GameObject modalRoot, Action close)
+        {
+            var b = modalRoot.GetComponent<ModalBackdrop>();
+            if (b == null) b = modalRoot.AddComponent<ModalBackdrop>();
+            b.Card = (RectTransform)modalRoot.transform.Find("Card");
+            b.OnOutside = close;
         }
 
         /// <summary>縦スクロールする領域。戻り値の content に行を足していく。</summary>

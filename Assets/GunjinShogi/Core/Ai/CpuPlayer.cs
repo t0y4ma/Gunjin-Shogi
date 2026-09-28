@@ -34,6 +34,13 @@ namespace GunjinShogi.Core.Ai
         public double FollowUp = 0.5;
         /// <summary>配置を選ぶときに比べるランダム配置の数。</summary>
         public int SetupCandidates = 60;
+        /// <summary>
+        /// 戦闘のない手を「戦況に関係するか」で選び分ける重み（0 で無効）。
+        /// 相手の駒・総司令部に近づく手を好み、横に動くだけの手や、最近いたマスへ戻る手（往復）を嫌う。
+        /// </summary>
+        public double PurposeWeight = 1;
+        /// <summary>往復とみなすためにさかのぼる自分の手数。</summary>
+        public int RevisitWindow = 8;
 
         public CpuSettings Clone() => (CpuSettings)MemberwiseClone();
 
@@ -68,6 +75,7 @@ namespace GunjinShogi.Core.Ai
         readonly Random rng;
         readonly int[][] distToHq = new int[2][]; // [攻める側] → ノードから相手総司令部までの歩数
         readonly int maxDist;
+        readonly int[][] walk; // [ノード] → 各ノードまでの歩数（駒の位置関係の目安）
 
         public CpuPlayer(RuleSet rules, int me, int seed, CpuSettings settings = null)
         {
@@ -80,6 +88,8 @@ namespace GunjinShogi.Core.Ai
             rng = new Random(seed);
             for (int p = 0; p < 2; p++) distToHq[p] = Bfs(Topology.HqNode(1 - p));
             foreach (var d in distToHq[0]) if (d < int.MaxValue) maxDist = Math.Max(maxDist, d);
+            walk = new int[Topology.NodeCount][];
+            for (int n = 0; n < walk.Length; n++) walk[n] = Bfs(n);
         }
 
         int[] Bfs(int target)
@@ -280,6 +290,42 @@ namespace GunjinShogi.Core.Ai
                 return false;
             }
 
+            /// <summary>
+            /// 戦闘のない手が戦況に関係するかの点（駒の損得や脅威は評価値のほうで見ているので、ここは同じくらいの手の選び分けに使う）。
+            /// 相手の駒・相手の総司令部に近づくなら加点。どちらにも近づかない（横に動くだけ・戦況のない所での手）なら減点。
+            /// 最近その駒がいたマスへ戻る手（様子見の往復）は大きく減点。
+            /// </summary>
+            double Purpose(Move m)
+            {
+                int me = cpu.Me;
+                int from = nodes[m.PieceId], to = m.ToNode;
+                int nearFrom = int.MaxValue, nearTo = int.MaxValue;
+                for (int j = 0; j < nodes.Length; j++)
+                {
+                    if (owners[j] == me || !view.Pieces[j].Alive || nodes[j] < 0) continue;
+                    if (nodes[j] == to) return 0; // 戦闘になる手は評価値に任せる
+                    nearFrom = Math.Min(nearFrom, cpu.walk[from][nodes[j]]);
+                    nearTo = Math.Min(nearTo, cpu.walk[to][nodes[j]]);
+                }
+                int advance = Clamp(cpu.distToHq[me][from] - cpu.distToHq[me][to]);
+                int approach = nearFrom == int.MaxValue ? 0 : Clamp(nearFrom - nearTo);
+                double score = 1.5 * advance + 2.0 * approach;
+                if (advance <= 0 && approach <= 0) score -= 2; // 横に動くだけ・戦況と関係のない所での手
+
+                // この駒が最近出ていったマスへ戻る（往復・行ったり来たり）
+                int own = 0;
+                for (int i = view.History.Count - 1; i >= 0 && own < cpu.Settings.RevisitWindow; i--)
+                {
+                    var h = view.History[i];
+                    if (h.Player != me) continue;
+                    own++;
+                    if (h.PieceId == m.PieceId && h.FromNode == to) score -= 5;
+                }
+                return score;
+            }
+
+            static int Clamp(int v) => v < -3 ? -3 : v > 3 ? 3 : v;
+
             void Finish()
             {
                 IsDone = true;
@@ -311,6 +357,7 @@ namespace GunjinShogi.Core.Ai
                         if (rep + 1 >= cpu.Rules.RepetitionDrawCount) s = 0; // この手で千日手（引き分け＝0点）
                         else s -= rep * (3 + 0.3 * Math.Max(0, s)); // 優勢なほど同じ局面に戻るのを嫌う
                     }
+                    if (cpu.Settings.PurposeWeight != 0) s += cpu.Settings.PurposeWeight * Purpose(moves[i]);
                     s += cpu.Gaussian() * cpu.Settings.Noise;
                     if (s > bestScore) { bestScore = s; best = i; }
                 }

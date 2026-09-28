@@ -233,6 +233,7 @@ namespace GunjinShogi.UnityView
             Ui.AutoSize(lobbyMessage, 24);
             var close = Ui.Button("CloseLobby", card, "閉じる", CloseLobby, fontSize: 28);
             Ui.Size(close, 66);
+            Ui.CloseOnBackdrop(root, CloseLobby);
         }
 
         static void Section(Transform parent, string text)
@@ -614,7 +615,7 @@ namespace GunjinShogi.UnityView
             }
 
             headerText.text = $"部屋 <color=#E3B341>{info.Code}</color>";
-            teamsText.text = TeamsLineOnline();
+            SetTeamsLineOnline();
             UpdateOnlineScreen();
         }
 
@@ -687,7 +688,7 @@ namespace GunjinShogi.UnityView
                 info.OpenRules(rules, currentOptions);
         }
 
-        string TeamsLineOnline()
+        void SetTeamsLineOnline()
         {
             string Name(int s)
             {
@@ -695,9 +696,7 @@ namespace GunjinShogi.UnityView
                 if (id == RoomInfo.NoSeat) return "（空席）";
                 return roomInfo.NameOf(id) + (id == myId ? "（あなた）" : "");
             }
-            return $"<color=#{ColorUtility.ToHtmlStringRGB(Color.Lerp(Theme.Team[0], Color.white, 0.35f))}>■ 朱</color> {Name(0)}　" +
-                   $"<color=#{ColorUtility.ToHtmlStringRGB(Color.Lerp(Theme.Team[1], Color.white, 0.45f))}>■ 藍</color> {Name(1)}" +
-                   (IsSpectator ? "　<color=#A39D88>観戦中</color>" : "");
+            teamsBar.Set(Name(0), Name(1), IsSpectator ? "観戦中" : "");
         }
 
         // ───────── 配置 ─────────
@@ -762,7 +761,7 @@ namespace GunjinShogi.UnityView
         void UpdateOnlineTurn()
         {
             if (onlineView == null || onlineView.Phase != GamePhase.Playing) return;
-            teamsText.text = TeamsLineOnline();
+            SetTeamsLineOnline();
             if (IsSpectator)
             {
                 inputMode = InputMode.None;

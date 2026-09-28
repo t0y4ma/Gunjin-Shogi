@@ -34,8 +34,10 @@ namespace GunjinShogi.UnityView
         BoardView board;
         Button inviteButton;
         LayoutElement infoButtonsLayout;
-        TextMeshProUGUI headerText, teamsText, statusText, subText, logText, titleRulesText, assistText;
+        TeamsBar teamsBar;
+        TextMeshProUGUI headerText, statusText, subText, logText, titleRulesText, assistText;
         GameObject logFrame, memoPalette;
+        MemoPalette memoPanel;
         GameObject setupRow, playRow, resultRow, replayRow, titleScreen, handoffScreen;
         TextMeshProUGUI handoffTitle, handoffBody;
         Button memoButton;
@@ -182,7 +184,7 @@ namespace GunjinShogi.UnityView
             inviteButton = Ui.Button("Invite", infoButtons.transform, "招待", CopyInvite, Ui.ButtonStyle.Primary, fontSize: 26);
             Ui.Size(inviteButton, -1, 160);
             SetInviteVisible(false);
-            teamsText = Row(Ui.Text("Teams", content, "", 28, Theme.Text), 40);
+            teamsBar = new TeamsBar(content, 40); // 名前だけ、収まらないときは自動で流す
             statusText = Row(Ui.Text("Status", content, "", 64, Theme.Text, bold: true), 84);
             Ui.AutoSize(statusText, 64);
             statusText.textWrappingMode = TextWrappingModes.NoWrap;
@@ -227,35 +229,11 @@ namespace GunjinShogi.UnityView
                 Ui.Button("EndReplay", null, "戻る", EndReplay, Ui.ButtonStyle.Primary));
         }
 
-        void BuildMemoPalette(Transform content)
+void BuildMemoPalette(Transform content)
         {
-            var frame = Ui.Image("MemoPalette", content, Theme.Hex("20251F"));
-            memoPalette = frame.gameObject;
-            var le = memoPalette.AddComponent<LayoutElement>();
-            le.flexibleHeight = 1;
-            le.minHeight = 0;
-            var col = Ui.Stretch(Ui.Rect("Column", frame.transform), 16, 14, 16, 14);
-            Ui.Column(col, 10);
-            assistText = Ui.Text("Assist", col, "", 24, Theme.TextMuted);
-            Ui.Size(assistText, 70);
-            Ui.AutoSize(assistText, 24);
-            for (int r = 0; r < 2; r++)
-            {
-                var row = Ui.Rect("Row" + r, col);
-                var h = row.gameObject.AddComponent<HorizontalLayoutGroup>();
-                h.spacing = 10;
-                h.childControlWidth = h.childControlHeight = true;
-                h.childForceExpandWidth = h.childForceExpandHeight = true;
-                var rle = row.gameObject.AddComponent<LayoutElement>();
-                rle.flexibleHeight = 1;
-                rle.minHeight = 50;
-                for (int i = 0; i < 6; i++)
-                {
-                    string label = MemoLabels[r * 6 + i];
-                    Ui.Button("Memo" + label, row, label, () => ApplyMemo(label), fontSize: 34);
-                }
-            }
-            memoPalette.SetActive(false);
+            memoPanel = new MemoPalette(content);
+            memoPanel.Apply = ApplyMemo;
+            memoPalette = memoPanel.Root;
         }
 
         static TextMeshProUGUI Row(TextMeshProUGUI t, float height)
@@ -310,6 +288,8 @@ namespace GunjinShogi.UnityView
             MenuButton(col, "設定・ルール", () => rulesScreen.Open(RefreshTitle), false);
             Spacer(col, 10);
             titleRulesText = Row(Ui.Text("Rules", col, "", 24, Theme.TextMuted, TextAlignmentOptions.Center), 40);
+            // どのビルドを読み込んでいるかを確かめられるように、版（ビルド日時）と通信の版を小さく出す
+            Row(Ui.Text("Version", col, $"版 {Application.version}　通信 v{GunjinShogi.Core.Online.Packet.ProtocolVersion}", 20, Theme.WithAlpha(Theme.TextMuted, 0.6f), TextAlignmentOptions.Center), 30);
         }
 
 void RefreshTitle()
@@ -465,7 +445,7 @@ void RefreshTitle()
             board.Init(rules, viewer);
             ClearMarks();
             SetMemoMode(false);
-            teamsText.text = TeamsLine();
+            SetTeamsLine();
             headerText.text = $"軍人将棋　<size=70%>{RulesScreen.Summary(options)}</size>";
             logText.text = "";
 
@@ -518,15 +498,14 @@ void RefreshTitle()
             v == MoveLog.Verdict.Win ? BoardView.StampKind.Win
             : v == MoveLog.Verdict.Lose ? BoardView.StampKind.Lose : BoardView.StampKind.Both;
 
-        string TeamsLine()
+        void SetTeamsLine()
         {
             string Seat(int p)
             {
                 if (seats[p] == SeatKind.Cpu) return $"CPU（{LevelName[(int)level]}）";
                 return Hotseat ? (p == 0 ? "先手" : "後手") : "あなた";
             }
-            return $"<color=#{ColorUtility.ToHtmlStringRGB(Color.Lerp(Theme.Team[0], Color.white, 0.35f))}>■ 朱</color> {Seat(0)}　　" +
-                   $"<color=#{ColorUtility.ToHtmlStringRGB(Color.Lerp(Theme.Team[1], Color.white, 0.45f))}>■ 藍</color> {Seat(1)}";
+            teamsBar.Set(Seat(0), Seat(1));
         }
 
         IEnumerator Handoff(int player, string body)
@@ -833,28 +812,36 @@ void ToggleMemo()
 void RefreshMemoPalette()
         {
             bool show = memoMode && memoTarget >= 0;
-            memoPalette.SetActive(show);
             logFrame.SetActive(!show);
-            if (!show) return;
+            if (!show) { memoPanel.Hide(); return; }
 
+            memos[viewer].TryGetValue(memoTarget, out var current);
             if (!display.Assist)
             {
-                assistText.text = "印を選んでください。推理アシストは設定でオンにできます。";
+                memoPanel.Show(rules, memoTarget, current, null, "この駒の予想を選んでください。推理アシストは表示設定でオンにできます。");
                 return;
             }
             if (beliefs[viewer] == null) beliefs[viewer] = new Belief(rules, topo, viewer);
             var belief = beliefs[viewer];
             belief.Update(online ? onlineView : PlayerView.From(state, viewer));
+            int target = memoTarget;
             var names = new List<string>();
+            var ruledOut = new List<string>();
             for (int t = 0; t < rules.Pieces.Count; t++)
-                if (belief.IsCandidate(memoTarget, t)) names.Add(rules.Piece(t).Name);
-            assistText.text = $"<color=#E2B23C>推理</color>　この駒は {string.Join("・", names)}（{names.Count}種）";
+                (belief.IsCandidate(target, t) ? names : ruledOut).Add(rules.Piece(t).Name);
+            // 候補が多いときは「〜ではない」のほうが短く読みやすい
+            string line = ruledOut.Count == 0 ? $"まだ絞り込めていない（{names.Count}種すべてあり得る）"
+                : names.Count <= ruledOut.Count
+                ? $"この駒は {string.Join("・", names)}（{names.Count}種）"
+                : $"この駒は {string.Join("・", ruledOut)} ではない（残り{names.Count}種）";
+            memoPanel.Show(rules, target, current, t => belief.IsCandidate(target, t),
+                $"<color=#E2B23C>推理</color>　{line}。あり得ない駒は暗くなり選べません。");
         }
 
-        void ApplyMemo(string label)
+void ApplyMemo(string label)
         {
             if (memoTarget < 0) return;
-            if (label == "消す") memos[viewer].Remove(memoTarget);
+            if (string.IsNullOrEmpty(label) || label == "消す") memos[viewer].Remove(memoTarget);
             else memos[viewer][memoTarget] = label;
             memoTarget = -1;
             RefreshMemoPalette();

@@ -485,7 +485,14 @@ namespace GunjinShogi.Core.Online
                 return;
             }
             int level = Math.Max(0, Math.Min(CpuLevelNames.Length - 1, p.B));
-            if (occupant != null && !occupant.Cpu) { Error(conn, "その席には人が座っています"); return; }
+            string moved = null;
+            if (occupant != null && !occupant.Cpu)
+            {
+                // 人が座っている席は、その人を観戦に移して CPU と交代する
+                moved = occupant.Name;
+                room.Seat[seat] = RoomInfo.NoSeat;
+                occupant = null;
+            }
             if (occupant == null)
             {
                 if (room.Members.Count >= MaxMembers) { Error(conn, "この部屋は満員です"); return; }
@@ -496,7 +503,9 @@ namespace GunjinShogi.Core.Online
             occupant.Level = level;
             occupant.Name = $"CPU（{CpuLevelNames[level]}）";
             room.Ready[seat] = true;
+            if (moved != null) ResetReady(room);
             BroadcastState(room);
+            if (moved != null) NoticeAll(room, $"{moved}さんの席に CPU が座りました（{moved}さんは観戦になります）");
         }
 
         /// <summary>準備完了を外す（CPU は常に準備完了）。</summary>

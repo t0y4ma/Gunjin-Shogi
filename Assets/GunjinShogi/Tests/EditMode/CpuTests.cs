@@ -17,6 +17,49 @@ namespace GunjinShogi.Core.Tests
         }
 
         [Test]
+        public void Cpu_RarelyShufflesBackAndForth()
+        {
+            // 戦闘のない手のうち、その駒が最近（自分の8手以内に）出ていったマスへ戻る手の割合を数える
+            var rules = StandardRules.Create23();
+            int quiet = 0, back = 0;
+            for (int g = 0; g < 2; g++)
+            {
+                var cpus = new CpuPlayer[2];
+                var s = new GameState(rules);
+                for (int p = 0; p < 2; p++)
+                {
+                    cpus[p] = new CpuPlayer(rules, p, 500 + g * 2 + p, CpuSettings.For(CpuLevel.Normal));
+                    s.SubmitSetup(p, cpus[p].ChooseSetup());
+                }
+                var left = new List<(int piece, int from, int player)>();
+                for (int ply = 0; ply < 150 && s.Phase == GamePhase.Playing; ply++)
+                {
+                    int p = s.CurrentPlayer;
+                    var t = cpus[p].BeginThink(PlayerView.From(s, p));
+                    while (!t.Step(1000)) { }
+                    if (t.Resign) break;
+                    var m = t.Result;
+                    int from = s.Pieces[m.PieceId].Node;
+                    if (s.OccupantOf(m.ToNode) < 0)
+                    {
+                        quiet++;
+                        int own = 0;
+                        for (int i = left.Count - 1; i >= 0 && own < 8; i--)
+                        {
+                            if (left[i].player != p) continue;
+                            own++;
+                            if (left[i].piece == m.PieceId && left[i].from == m.ToNode) { back++; break; }
+                        }
+                    }
+                    left.Add((m.PieceId, from, p));
+                    s.ApplyMove(m);
+                }
+            }
+            Assert.Greater(quiet, 0);
+            Assert.Less((double)back / quiet, 0.15, $"往復が多すぎる（{back}/{quiet}）");
+        }
+
+        [Test]
         public void Belief_NeverExcludesTrueType()
         {
             var rng = new Random(3);

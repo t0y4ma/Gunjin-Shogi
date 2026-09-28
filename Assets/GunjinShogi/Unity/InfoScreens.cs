@@ -50,6 +50,7 @@ namespace GunjinShogi.UnityView
             Ui.AutoSize(tableNote, 22);
             var closeT = Ui.Button("CloseTable", tContent, "閉じる", () => tableRoot.SetActive(false), Ui.ButtonStyle.Primary, 30);
             Ui.Size(closeT, 76);
+            Ui.CloseOnBackdrop(tRoot, () => tableRoot.SetActive(false));
 
             // ── ルール表示 ──
             var (rRoot, rContent) = Ui.Modal("RulesView", canvas, 0.6f, 0.94f);
@@ -66,6 +67,7 @@ namespace GunjinShogi.UnityView
             rulesBody.gameObject.AddComponent<ContentSizeFitter>().verticalFit = ContentSizeFitter.FitMode.PreferredSize;
             var closeR = Ui.Button("CloseRules", rContent, "閉じる", () => rulesRoot.SetActive(false), Ui.ButtonStyle.Primary, 30);
             Ui.Size(closeR, 76);
+            Ui.CloseOnBackdrop(rRoot, () => rulesRoot.SetActive(false));
         }
 
 void BuildGrid(Transform parent)

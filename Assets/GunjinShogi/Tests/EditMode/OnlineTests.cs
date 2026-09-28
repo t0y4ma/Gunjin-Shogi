@@ -349,6 +349,26 @@ namespace GunjinShogi.Core.Tests
         }
 
         [Test]
+        public void CpuSeat_OwnerCanReplaceSeatedHuman()
+        {
+            var h = new Harness();
+            h.Send(1, Create("tokenA"));
+            string room = h.Last(1, Op.RoomJoined).S1;
+            h.Send(2, Join("tokenB", room));
+            h.Send(2, Packet.Of(Op.TakeSeat, 1));
+            int human = h.MemberId[2];
+            Assert.AreEqual(human, h.Room(1).SeatMember[1]);
+
+            h.Send(1, Packet.Of(Op.SetSeatCpu, 1, 1));
+            var info = h.Room(1);
+            Assert.IsTrue(info.Member(info.SeatMember[1]).IsCpu, "人の席を CPU と交代できる");
+            Assert.AreEqual(RoomInfo.NoSeat, info.SeatOf(human), "座っていた人は観戦になる");
+            Assert.IsNotNull(info.Member(human), "部屋からは追い出さない");
+            Assert.IsFalse(info.Ready[0], "席が変わったので準備完了は取り直し");
+            Assert.IsTrue(info.Ready[1]);
+        }
+
+        [Test]
         public void VersionMismatch_IsReported_AndLastLeaverClosesRoom()
         {
             var h = new Harness();

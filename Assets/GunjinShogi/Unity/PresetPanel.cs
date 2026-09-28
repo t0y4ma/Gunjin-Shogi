@@ -70,6 +70,7 @@ namespace GunjinShogi.UnityView
             spacer.flexibleHeight = 1;
             var close = Ui.Button("Close", content, "閉じる", Close, Ui.ButtonStyle.Primary, 32);
             Ui.Size(close, 84);
+            Ui.CloseOnBackdrop(root, Close);
         }
 
         public void Open(RuleSet rules, BoardTopology topo, int player,

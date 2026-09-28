@@ -38,6 +38,8 @@ namespace GunjinShogi.EditorTools
         {
             // Linux の IL2CPP ビルドの前に作業ターゲットを Linux にしておくことがあるので、終わったら Windows に戻す
             var restoreTarget = BuildTarget.StandaloneWindows64;
+            // タイトルに出す版（ビルド日時）。公開中の WebGL がどのビルドかを見分けられるようにする
+            PlayerSettings.bundleVersion = DateTime.Now.ToString("yyyy.MM.dd.HHmm");
             var log = new System.Text.StringBuilder();
             bool ok = true;
             try

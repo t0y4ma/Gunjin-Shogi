@@ -18,7 +18,7 @@ static class Program
         Console.OutputEncoding = System.Text.Encoding.UTF8;
         if (args.Length >= 3 && args[0] == "time") return Time(int.Parse(args[1]), args[2]);
         int games = int.Parse(args[0]);
-        int threads = Math.Max(1, Environment.ProcessorCount * 35 / 100) // PC 全体の CPU 使用率を 4 割程度に抑える;
+        int threads = Math.Max(1, Environment.ProcessorCount * 35 / 100); // PC 全体の CPU 使用率を 4 割程度に抑える
         for (int i = 1; i + 1 < args.Length; i += 2) Match(args[i], args[i + 1], games, threads);
         return 0;
     }

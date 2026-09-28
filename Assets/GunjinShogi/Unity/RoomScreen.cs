@@ -146,9 +146,8 @@ namespace GunjinShogi.UnityView
             card.Title = Ui.Text("Title", col, $"{(seat == 0 ? "先手" : "後手")}（{Theme.TeamName[seat]}）", 26, teamColor, bold: true);
             Ui.Size(card.Title, 36);
             card.Name = Ui.Text("Name", col, "", 40, Theme.Text, bold: true);
-            card.Name.textWrappingMode = TextWrappingModes.NoWrap;
-            Ui.AutoSize(card.Name, 40);
             Ui.Size(card.Name, 56);
+            Ui.Marquee(card.Name, 40);
             card.State = Ui.Text("State", col, "", 24, Theme.TextMuted);
             Ui.Size(card.State, 34);
             var spacer = Ui.Size(Ui.Rect("Spacer", col));
@@ -215,7 +214,7 @@ namespace GunjinShogi.UnityView
         {
             if (info == null || !IsOwner) return;
             var m = info.Member(info.SeatMember[seat]);
-            if (m == null) SetSeatCpu?.Invoke(seat, AppSettings.CpuLevel);
+            if (m == null || !m.IsCpu) SetSeatCpu?.Invoke(seat, AppSettings.CpuLevel); // 空席に座らせる／人と交代
             else if (m.IsCpu) SetSeatCpu?.Invoke(seat, (m.CpuLevel + 1) % RoomService.CpuLevelNames.Length); // 強さを順に切り替え
         }
 
@@ -274,12 +273,12 @@ namespace GunjinShogi.UnityView
                 else { label = "着席中"; enabled = false; }
                 Ui.SetLabel(c.Action, label);
                 c.Action.interactable = enabled;
-                // 部屋主だけ：空席に CPU を座らせる・座っている CPU の強さを切り替える
-                bool showCpu = owner && (m == null || cpuSeat);
+                // 部屋主だけ：空席に CPU を座らせる・人と CPU を交代する・座っている CPU の強さを切り替える
+                bool showCpu = owner;
                 c.Cpu.gameObject.SetActive(showCpu);
                 if (showCpu)
                 {
-                    Ui.SetLabel(c.Cpu, cpuSeat ? $"強さ：{RoomService.CpuLevelNames[m.CpuLevel]} ›" : "CPUを座らせる");
+                    Ui.SetLabel(c.Cpu, cpuSeat ? $"強さ：{RoomService.CpuLevelNames[m.CpuLevel]} ›" : m == null ? "CPUを座らせる" : "CPUと交代");
                     c.Cpu.interactable = lobby;
                 }
             }
@@ -331,9 +330,8 @@ namespace GunjinShogi.UnityView
             string role = (seat == 0 ? "先手" : seat == 1 ? "後手" : "観戦") + (m.IsCpu ? "・CPU" : "");
             string text = $"{(m.Id == room.OwnerId ? "<color=#E3B341>★</color>" : "　")} {m.Name}{(m.Id == myId ? "（あなた）" : "")}　<color=#A39D88>{role}{(m.Present ? "" : "・切断中")}{(m.Id == room.OwnerId ? "・部屋主" : "")}</color>";
             var t = Ui.Text("Name", row.transform, text, 24, Theme.Text);
-            t.textWrappingMode = TextWrappingModes.NoWrap;
-            Ui.AutoSize(t, 24);
             Ui.Size(t, -1, 300, 1);
+            Ui.Marquee(t, 24);
             if (owner && m.Id != myId && m.Present && !m.IsCpu)
             {
                 int id = m.Id;
