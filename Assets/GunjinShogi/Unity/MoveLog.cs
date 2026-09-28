@@ -18,26 +18,31 @@ namespace GunjinShogi.UnityView
             return attackerIsMine == attackerWon ? Verdict.Win : Verdict.Lose;
         }
 
-        public static string Describe(MoveView h, PlayerView view, RuleSet rules)
+        /// <summary>
+        /// 1手を文章にする。hiddenOwner の駒は名前を伏せる（観戦者が「先手のみ」などを選んだとき）。
+        /// 観戦者の見え方では「自/敵」の代わりに「先/後」、勝敗は攻めた側から見た結果にする。
+        /// </summary>
+        public static string Describe(MoveView h, PlayerView view, RuleSet rules, int hiddenOwner = -1)
         {
             int viewer = view.Viewer;
-            bool mine = h.Player == viewer;
-            string Name(int type) => type == Visibility.HiddenType ? "駒" : rules.Piece(type).Name;
+            bool spectator = viewer == Visibility.Spectator;
+            string Side(int player) => spectator ? (player == 0 ? "先 " : "後 ") : (player == viewer ? "自 " : "敵 ");
+            string Name(int type, int owner) => type == Visibility.HiddenType || owner == hiddenOwner ? "駒" : rules.Piece(type).Name;
 
             var sb = new StringBuilder();
             sb.Append("<color=#A39D88>").Append(h.Ply.ToString().PadLeft(3)).Append("</color>  ");
             if (!h.HadBattle)
             {
-                string mover = (mine ? "自 " : "敵 ") + Name(view.Pieces[h.PieceId].TypeId); // 敵の駒は、対局後の全公開でだけ名前が出る
-                sb.Append(mover).Append(" 移動");
+                // 敵の駒は、対局後の全公開（または観戦）でだけ名前が出る
+                sb.Append(Side(h.Player)).Append(Name(view.Pieces[h.PieceId].TypeId, h.Player)).Append(" 移動");
                 return sb.ToString();
             }
 
             int attackerType = h.AttackerType != Visibility.HiddenType ? h.AttackerType : view.Pieces[h.PieceId].TypeId;
-            string attacker = (mine ? "自 " : "敵 ") + Name(attackerType);
-            string defender = (mine ? "敵 " : "自 ") + Name(h.DefenderType);
+            string attacker = Side(h.Player) + Name(attackerType, h.Player);
+            string defender = Side(1 - h.Player) + Name(h.DefenderType, 1 - h.Player);
             sb.Append(attacker).Append(" → ").Append(defender).Append("  ");
-            switch (VerdictFor(h, viewer))
+            switch (VerdictFor(h, spectator ? h.Player : viewer))
             {
                 case Verdict.Win: sb.Append("<color=#E0705A><b>勝</b></color>"); break;
                 case Verdict.Lose: sb.Append("<color=#9C978A><b>負</b></color>"); break;

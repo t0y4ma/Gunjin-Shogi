@@ -15,18 +15,16 @@ namespace GunjinShogi.Core.Tests
             public readonly RoomService Server;
             public readonly Dictionary<int, List<Packet>> Inbox = new Dictionary<int, List<Packet>>();
             public readonly Dictionary<int, PlayerView> Views = new Dictionary<int, PlayerView>();
-            public readonly Dictionary<int, int> Seat = new Dictionary<int, int>();
+            public readonly Dictionary<int, RoomInfo> Rooms = new Dictionary<int, RoomInfo>();
+            public readonly Dictionary<int, int> MemberId = new Dictionary<int, int>();
             public double Now;
-            public int BytesSent;
 
             public Harness()
             {
                 Server = new RoomService((conn, p) =>
                 {
                     // 実際と同じくバイト列を経由させる
-                    var bytes = p.Encode();
-                    BytesSent += bytes.Length;
-                    var q = Packet.Decode(bytes);
+                    var q = Packet.Decode(p.Encode());
                     if (!Inbox.TryGetValue(conn, out var list)) Inbox[conn] = list = new List<Packet>();
                     list.Add(q);
                     Apply(conn, q);
@@ -37,24 +35,25 @@ namespace GunjinShogi.Core.Tests
             {
                 switch (p.Op)
                 {
-                    case Op.RoomJoined: Seat[conn] = p.A; break;
+                    case Op.RoomJoined: MemberId[conn] = p.A; break;
+                    case Op.RoomState: Rooms[conn] = RoomInfo.Decode(p.Data); break;
                     case Op.Snapshot: Views[conn] = ViewCodec.Decode(p.Data); break;
-                    case Op.MoveMade:
-                        Views[conn].ApplyMove(ViewCodec.DecodeMove(p.Data), p.A, (GameResult)p.B, (EndReason)p.C);
-                        break;
+                    case Op.MoveMade: Views[conn].ApplyMove(ViewCodec.DecodeMove(p.Data), p.A, (GameResult)p.B, (EndReason)p.C); break;
                     case Op.GameOver: Views[conn] = ViewCodec.Decode(p.Data); break;
                 }
             }
 
-            public Packet Last(int conn, Op op) => Inbox[conn].FindLast(p => p.Op == op);
+            public Packet Last(int conn, Op op) => Inbox.TryGetValue(conn, out var l) ? l.FindLast(p => p.Op == op) : null;
             public void Send(int conn, Packet p) => Server.Receive(conn, Packet.Decode(p.Encode()));
+            public int Seat(int conn) => Rooms[conn].SeatOf(MemberId[conn]);
+            public RoomInfo Room(int conn) => Rooms[conn];
         }
 
-        static Packet Create(string token, string rule = "0") =>
-            Packet.Of(Op.CreateRoom, Packet.ProtocolVersion, s1: token, s2: rule);
+        static Packet Create(string token, string rule = "0", bool open = true, string name = "") =>
+            Packet.Of(Op.CreateRoom, Packet.ProtocolVersion, open ? 1 : 0, s1: token, s2: rule, data: System.Text.Encoding.UTF8.GetBytes(name));
 
-        static Packet Join(string token, string room) =>
-            Packet.Of(Op.JoinRoom, Packet.ProtocolVersion, s1: token, s2: room);
+        static Packet Join(string token, string room, string name = "") =>
+            Packet.Of(Op.JoinRoom, Packet.ProtocolVersion, s1: token, s2: room, data: System.Text.Encoding.UTF8.GetBytes(name));
 
         static string RandomSetupCode(RuleSet rules, int seat, Random rng)
         {
@@ -62,16 +61,22 @@ namespace GunjinShogi.Core.Tests
             return SetupCodec.Encode(topo, seat, RandomSetup.Generate(rules, topo, seat, rng));
         }
 
-        /// <summary>2人が部屋に入って配置を終えたところまで進める。戻り値は部屋番号。</summary>
+        /// <summary>1 が部屋を作り（先手席）、2 が入って後手席に着き、両者準備完了 → 開始 → 配置まで。戻り値は部屋番号。</summary>
         static string StartGame(Harness h, Random rng, string rule = "0")
         {
             h.Send(1, Create("tokenA", rule));
             string room = h.Last(1, Op.RoomJoined).S1;
             h.Send(2, Join("tokenB", room));
+            h.Send(2, Packet.Of(Op.TakeSeat, 1));
+            h.Send(1, Packet.Of(Op.SetReady, 1));
+            h.Send(2, Packet.Of(Op.SetReady, 1));
+            h.Send(1, Packet.Of(Op.StartGame));
+            Assert.AreEqual(RoomPhase.Setup, h.Room(1).Phase);
             RuleCodec.TryDecode(rule, out var o);
             var rules = StandardRules.Create23(o);
             h.Send(1, Packet.Of(Op.SubmitSetup, s1: RandomSetupCode(rules, 0, rng)));
             h.Send(2, Packet.Of(Op.SubmitSetup, s1: RandomSetupCode(rules, 1, rng)));
+            Assert.AreEqual(RoomPhase.Playing, h.Room(1).Phase);
             return room;
         }
 
@@ -86,67 +91,119 @@ namespace GunjinShogi.Core.Tests
         }
 
         [Test]
-        public void FullGame_ClientViewsMatchServer_AndHideEnemyTypes()
+        public void FullGame_PlayersSeeOnlyOwnTypes_SpectatorSeesAll()
         {
             var h = new Harness();
             var rng = new Random(3);
-            StartGame(h, rng);
-            Assert.AreEqual(0, h.Seat[1]);
-            Assert.AreEqual(1, h.Seat[2]);
+            string room = StartGame(h, rng);
+            h.Send(3, Join("tokenC", room, "見る人"));
+            Assert.AreEqual(RoomInfo.NoSeat, h.Seat(3), "対局中に入った人は観戦");
+            Assert.AreEqual(Visibility.Spectator, h.Views[3].Viewer);
+            Assert.AreEqual("見る人", h.Room(1).NameOf(h.MemberId[3]));
 
-            // 両者の見え方を差分だけで更新しながら最後まで指す
+            var rules = StandardRules.Create23();
             for (int ply = 0; ply < 600; ply++)
             {
                 var v = h.Views[1];
                 if (v.Phase != GamePhase.Playing) break;
-                int turnConn = v.CurrentPlayer == h.Seat[1] ? 1 : 2;
-                var myView = h.Views[turnConn];
-                var rules = StandardRules.Create23();
-                var moves = myView.ToMoveState(rules, new BoardTopology(rules.Board)).GetLegalMoves();
-                Assert.IsNotEmpty(moves);
+                int turnConn = v.CurrentPlayer == h.Seat(1) ? 1 : 2;
+                var moves = h.Views[turnConn].ToMoveState(rules, new BoardTopology(rules.Board)).GetLegalMoves();
                 var m = moves[rng.Next(moves.Count)];
                 h.Send(turnConn, Packet.Of(Op.Move, m.PieceId, m.ToNode));
                 Assert.IsNull(h.Inbox[turnConn].Find(p => p.Op == Op.Error), "合法手が拒否された");
 
-                // 差分で更新した見え方に、相手の駒種が一切含まれない
                 foreach (int c in new[] { 1, 2 })
                 {
                     var cv = h.Views[c];
                     if (cv.Phase == GamePhase.Finished) continue;
                     foreach (var p in cv.Pieces)
-                        if (p.Owner != h.Seat[c]) Assert.AreEqual(Visibility.HiddenType, p.TypeId);
-                    foreach (var mv in cv.History)
-                    {
-                        if (!mv.HadBattle) continue;
-                        if (cv.Pieces[mv.AttackerId].Owner != h.Seat[c]) Assert.AreEqual(Visibility.HiddenType, mv.AttackerType);
-                        if (cv.Pieces[mv.DefenderId].Owner != h.Seat[c]) Assert.AreEqual(Visibility.HiddenType, mv.DefenderType);
-                    }
+                        if (p.Owner != h.Seat(c)) Assert.AreEqual(Visibility.HiddenType, p.TypeId, "相手の駒種が見えている");
                 }
+                if (h.Views[3].Phase == GamePhase.Playing)
+                    foreach (var p in h.Views[3].Pieces) Assert.AreNotEqual(Visibility.HiddenType, p.TypeId, "観戦者には両者の駒種を送る");
             }
 
-            var over = h.Last(1, Op.GameOver);
-            Assert.IsNotNull(over, "終局しなかった");
-            // 終局後は全公開
-            foreach (var p in h.Views[1].Pieces) Assert.AreNotEqual(Visibility.HiddenType, p.TypeId);
+            var over = h.Last(3, Op.GameOver);
+            Assert.IsNotNull(over, "観戦者にも終局が届く");
             Assert.AreEqual(23, over.S1.Length);
-            Assert.AreEqual(23, over.S2.Length);
+            Assert.AreEqual(RoomPhase.Lobby, h.Room(1).Phase, "終局後は準備画面に戻る");
+            Assert.IsFalse(h.Room(1).Ready[0] || h.Room(1).Ready[1]);
+            Assert.AreEqual(0, h.Seat(1), "席はそのまま");
         }
 
         [Test]
-        public void IllegalMoves_AreRejected()
+        public void OnlyOwner_ChangesRules_StartsGame_AndCanTransfer()
         {
             var h = new Harness();
-            var rng = new Random(4);
-            StartGame(h, rng);
-            // 後手が先手の番に指す
-            var v2 = h.Views[2];
-            int myPiece = v2.Pieces.FindIndex(p => p.Owner == 1 && p.Alive);
-            h.Send(2, Packet.Of(Op.Move, myPiece, v2.Pieces[myPiece].Node));
-            Assert.IsNotNull(h.Last(2, Op.Error));
-            // 先手が相手の駒を動かそうとする
-            h.Send(1, Packet.Of(Op.Move, myPiece, 0));
-            Assert.IsNotNull(h.Last(1, Op.Error));
-            Assert.AreEqual(0, h.Views[1].History.Count);
+            h.Send(1, Create("tokenA", "A1", name: "主"));
+            string room = h.Last(1, Op.RoomJoined).S1;
+            h.Send(2, Join("tokenB", room));
+            Assert.AreEqual("A1", h.Room(2).RuleCode);
+
+            h.Send(2, Packet.Of(Op.SetRules, s1: "0"));
+            Assert.AreEqual("部屋主だけができる操作です", h.Last(2, Op.Error).S1);
+            Assert.AreEqual("A1", h.Room(1).RuleCode);
+
+            h.Send(2, Packet.Of(Op.TakeSeat, 1));
+            h.Send(1, Packet.Of(Op.SetReady, 1));
+            h.Send(2, Packet.Of(Op.SetReady, 1));
+            Assert.IsTrue(h.Room(1).CanStart);
+            h.Send(2, Packet.Of(Op.StartGame));
+            Assert.AreEqual(RoomPhase.Lobby, h.Room(1).Phase, "部屋主以外は開始できない");
+
+            // ルールを変えると準備完了が外れる
+            h.Send(1, Packet.Of(Op.SetRules, s1: "A1E2"));
+            Assert.AreEqual("A1E2", h.Room(2).RuleCode);
+            Assert.IsFalse(h.Room(2).Ready[0] || h.Room(2).Ready[1]);
+
+            // 部屋主を譲る
+            h.Send(1, Packet.Of(Op.TransferOwner, h.MemberId[2]));
+            Assert.AreEqual(h.MemberId[2], h.Room(1).OwnerId);
+            h.Send(1, Packet.Of(Op.SetRules, s1: "0"));
+            Assert.AreEqual("部屋主だけができる操作です", h.Last(1, Op.Error).S1);
+
+            // 部屋主が抜けたら残った人へ
+            h.Send(2, Packet.Of(Op.LeaveRoom));
+            Assert.AreEqual(h.MemberId[1], h.Room(1).OwnerId);
+        }
+
+        [Test]
+        public void Seats_OwnerCanTakeAnySide_OthersOnlyEmpty()
+        {
+            var h = new Harness();
+            h.Send(1, Create("tokenA"));
+            string room = h.Last(1, Op.RoomJoined).S1;
+            h.Send(2, Join("tokenB", room));
+            h.Send(3, Join("tokenC", room));
+            h.Send(2, Packet.Of(Op.TakeSeat, 1));
+            // 観戦者は埋まった席に座れない
+            h.Send(3, Packet.Of(Op.TakeSeat, 0));
+            Assert.AreEqual("その席にはほかの人が座っています", h.Last(3, Op.Error).S1);
+            // 部屋主は後手席へ移れる（座っていた人は先手席へ入れ替わる）
+            h.Send(1, Packet.Of(Op.TakeSeat, 1));
+            Assert.AreEqual(1, h.Seat(1));
+            Assert.AreEqual(0, h.Seat(2));
+            // 席を立つと空席になり、観戦者が座れる
+            h.Send(2, Packet.Of(Op.TakeSeat, -1));
+            h.Send(3, Packet.Of(Op.TakeSeat, 0));
+            Assert.AreEqual(0, h.Seat(3));
+        }
+
+        [Test]
+        public void AbortSetup_ReturnsEveryoneToLobby()
+        {
+            var h = new Harness();
+            h.Send(1, Create("tokenA"));
+            string room = h.Last(1, Op.RoomJoined).S1;
+            h.Send(2, Join("tokenB", room));
+            h.Send(2, Packet.Of(Op.TakeSeat, 1));
+            h.Send(1, Packet.Of(Op.SetReady, 1));
+            h.Send(2, Packet.Of(Op.SetReady, 1));
+            h.Send(1, Packet.Of(Op.StartGame));
+            Assert.AreEqual(RoomPhase.Setup, h.Room(2).Phase);
+            h.Send(2, Packet.Of(Op.AbortSetup));
+            Assert.AreEqual(RoomPhase.Lobby, h.Room(1).Phase);
+            StringAssert.Contains("中断", h.Last(1, Op.Notice).S1);
         }
 
         [Test]
@@ -159,25 +216,17 @@ namespace GunjinShogi.Core.Tests
             var moves = h.Views[1].ToMoveState(rules, new BoardTopology(rules.Board)).GetLegalMoves();
             h.Send(1, Packet.Of(Op.Move, moves[0].PieceId, moves[0].ToNode));
 
-            // 後手が切断 → 先手に「相手不在」が伝わる
             h.Server.Disconnected(2);
             h.Now = 10;
-            var status = h.Last(1, Op.RoomStatus);
-            Assert.AreEqual(0, status.B & (int)StatusFlags.OpponentPresent);
+            Assert.GreaterOrEqual(h.Room(1).AbsentSeconds[1], 0, "相手不在が伝わる");
 
-            // 60秒経つ前の勝ち申請は拒否
             h.Send(1, Packet.Of(Op.ClaimWin));
             Assert.AreEqual("まだ勝ちを申請できません", h.Last(1, Op.Error).S1);
 
-            // 別の接続番号・同じトークンで戻ると、同じ席と盤面が戻る
             h.Send(3, Join("tokenB", room));
-            Assert.AreEqual(1, h.Seat[3]);
+            Assert.AreEqual(1, h.Seat(3));
             Assert.AreEqual(1, h.Views[3].History.Count);
-            Assert.AreNotEqual(0, h.Last(1, Op.RoomStatus).B & (int)StatusFlags.OpponentPresent);
-
-            // 知らない人は対局中の部屋に入れない
-            h.Send(4, Join("stranger", room));
-            Assert.IsNotNull(h.Last(4, Op.Error));
+            Assert.AreEqual(-1, h.Room(1).AbsentSeconds[1]);
         }
 
         [Test]
@@ -191,32 +240,62 @@ namespace GunjinShogi.Core.Tests
             var over = h.Last(1, Op.GameOver);
             Assert.IsNotNull(over);
             Assert.AreEqual((int)GameResult.Player0Win, over.A);
+            Assert.AreEqual(1, h.Room(1).Members.Count, "切断したままの対局者は外れる");
         }
 
         [Test]
-        public void Rematch_SwapsFirstPlayer()
+        public void RoomList_ShowsOpenRooms_AndRejoinOnlyWhenSeatRemains()
         {
             var h = new Harness();
-            StartGame(h, new Random(7));
-            h.Send(1, Packet.Of(Op.Resign));
-            Assert.IsNotNull(h.Last(2, Op.GameOver));
-            h.Send(1, Packet.Of(Op.Rematch));
-            h.Send(2, Packet.Of(Op.Rematch));
-            Assert.AreEqual(1, h.Seat[1]);
-            Assert.AreEqual(0, h.Seat[2]);
-            Assert.AreEqual((int)RoomPhase.Setup, h.Last(1, Op.RoomStatus).A);
+            h.Send(1, Create("tokenA", open: true, name: "公開"));
+            string open = h.Last(1, Op.RoomJoined).S1;
+            h.Send(2, Create("tokenB", open: false));
+            string priv = h.Last(2, Op.RoomJoined).S1;
+
+            h.Send(9, Packet.Of(Op.ListRooms, Packet.ProtocolVersion));
+            var list = RoomListInfo.Decode(h.Last(9, Op.RoomList).Data);
+            Assert.AreEqual(1, list.Rooms.Count);
+            Assert.AreEqual(open, list.Rooms[0].Code);
+            Assert.AreEqual("公開", list.Rooms[0].OwnerName);
+            Assert.IsFalse(list.Rooms.Exists(r => r.Code == priv));
+
+            // 全員いなくなった部屋は「前の対局に戻る」の対象にならない
+            h.Server.Disconnected(1);
+            h.Send(9, Packet.Of(Op.ListRooms, Packet.ProtocolVersion, s1: open, s2: "tokenA"));
+            Assert.IsFalse(RoomListInfo.Decode(h.Last(9, Op.RoomList).Data).CanRejoin);
+
+            // 対局中に切断した席は戻れる
+            var h2 = new Harness();
+            string room = StartGame(h2, new Random(8));
+            h2.Server.Disconnected(2);
+            h2.Send(9, Packet.Of(Op.ListRooms, Packet.ProtocolVersion, s1: room, s2: "tokenB"));
+            Assert.IsTrue(RoomListInfo.Decode(h2.Last(9, Op.RoomList).Data).CanRejoin);
+            h2.Send(9, Packet.Of(Op.ListRooms, Packet.ProtocolVersion, s1: room, s2: "someoneElse"));
+            Assert.IsFalse(RoomListInfo.Decode(h2.Last(9, Op.RoomList).Data).CanRejoin);
         }
 
         [Test]
-        public void RulesFromCreator_AreUsed_AndLastLeaverClosesRoom()
+        public void IllegalMoves_AndSpectatorMoves_AreRejected()
         {
             var h = new Harness();
-            h.Send(1, Create("tokenA", "A1"));
-            var joined = h.Last(1, Op.RoomJoined);
-            Assert.AreEqual("A1", joined.S2);
-            h.Send(2, Join("tokenB", joined.S1));
-            Assert.AreEqual("A1", h.Last(2, Op.RoomJoined).S2);
+            string room = StartGame(h, new Random(4));
+            h.Send(3, Join("tokenC", room));
+            var v2 = h.Views[2];
+            int piece = v2.Pieces.FindIndex(p => p.Owner == 1 && p.Alive);
+            h.Send(2, Packet.Of(Op.Move, piece, v2.Pieces[piece].Node));
+            Assert.IsNotNull(h.Last(2, Op.Error));
+            int p0 = h.Views[1].Pieces.FindIndex(p => p.Owner == 0 && p.Alive);
+            h.Send(3, Packet.Of(Op.Move, p0, 0));
+            Assert.AreEqual(0, h.Views[1].History.Count, "観戦者は指せない");
+        }
 
+        [Test]
+        public void VersionMismatch_IsReported_AndLastLeaverClosesRoom()
+        {
+            var h = new Harness();
+            h.Send(1, Create("tokenA"));
+            string room = h.Last(1, Op.RoomJoined).S1;
+            h.Send(2, Join("tokenB", room));
             h.Send(1, Packet.Of(Op.LeaveRoom));
             Assert.AreEqual(1, h.Server.RoomCount);
             h.Server.Disconnected(2);

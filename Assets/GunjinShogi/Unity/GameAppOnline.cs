@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Text;
 using GunjinShogi.Core;
 using GunjinShogi.Core.Online;
 using TMPro;
@@ -9,44 +10,56 @@ using UnityEngine.UI;
 namespace GunjinShogi.UnityView
 {
     /// <summary>
-    /// オンライン対戦の画面と進行（GameApp の続き）。盤・パネルはローカル対戦と共通で、
-    /// 違いは「見え方（PlayerView）をサーバーから受け取る」「自分の操作をサーバーへ送る」ことだけ。
+    /// オンライン対戦の画面と進行（GameApp の続き）。盤・パネルはローカル対戦と共通。
+    /// 部屋に入ると準備画面（RoomScreen）→ 部屋主の開始で配置 → 対局 → 終局後は準備画面へ戻る。
+    /// 着席していない人は観戦者で、両者の駒種を受け取り「先手のみ／後手のみ／両方」を切り替えて見る。
     /// </summary>
     public sealed partial class GameApp
     {
         const string TokenKey = "gs.clientToken";
         const string LastRoomKey = "gs.lastRoom";
+        const string OpenKey = "gs.roomOpen";
+        const float ListInterval = 3f;
 
-        // 対局の状態（サーバーから届いたもの）
+        // サーバーから届いたもの
         bool online;
+        string roomCode = "";
+        int myId = -1;
+        RoomInfo roomInfo;
         PlayerView onlineView;
         GameState onlineMoveState;
-        string roomCode = "";
-        int onlineSeat;
-        RoomPhase onlinePhase;
-        StatusFlags onlineFlags;
-        float opponentLeftAt = -1;   // 相手が切断した時刻（つながっていれば -1）
         bool onlineSetupActive;
+        bool showingResult;             // 終局の盤面・感想戦を見ている（準備画面へ戻るまで）
         GameResult onlineResult;
         EndReason onlineReason;
+        float opponentLeftAt = -1;      // 相手の対局者が切断した時刻（つながっていれば -1）
+        int spectatorShow = 2;          // 観戦者の表示：0=先手のみ 1=後手のみ 2=両方
 
         // 通信
         IGameConnection net;
-        Action onConnected;          // 接続できたら実行する操作（部屋を作る・入る）
-        bool leavingOnline;          // 自分から抜けたときは再接続しない
+        Action onConnected;
+        bool leavingOnline;
         bool reconnecting;
         float reconnectAt;
         int reconnectTries;
         bool devBotPending;
-        bool rejoinPending;          // 再接続で同じ部屋に入り直している途中
+        bool rejoinPending;
+        float nextListAt;
 
         // 画面
-        GameObject lobbyRoot, waitRow;
-        TextMeshProUGUI lobbyStatus, lobbyRules, lobbyMessage;
-        TMP_InputField lobbyCodeInput;
-        Button lobbyCreate, lobbyJoin, lobbyRejoin, claimWinButton, againButton, lobbyDev;
+        GameObject lobbyRoot, waitRow, spectateRow;
+        TextMeshProUGUI lobbyStatus, lobbyMessage, lobbyListNote, debugBadge;
+        TMP_InputField lobbyCodeInput, lobbyNameInput;
+        Button lobbyCreate, lobbyJoin, lobbyRejoin, lobbyDev, lobbyOpenButton, lobbyPrivateButton;
+        Button claimWinButton, againButton, spectateToggle, waitAbortButton;
+        RectTransform roomListContent;
+        readonly List<GameObject> roomListRows = new List<GameObject>();
+        RoomScreen roomScreen;
 
-        /// <summary>サーバーとの接続。エディタでは既定で模擬サーバー（EditorLoopback）、それ以外は Mirror。</summary>
+        int MySeat => roomInfo == null ? RoomInfo.NoSeat : roomInfo.SeatOf(myId);
+        bool IsOwner => roomInfo != null && roomInfo.OwnerId == myId;
+        bool IsSpectator => online && MySeat == RoomInfo.NoSeat;
+
         IGameConnection Net
         {
             get
@@ -67,11 +80,24 @@ namespace GunjinShogi.UnityView
             }
         }
 
+        bool IsLoopback
+        {
+            get
+            {
+#if UNITY_EDITOR
+                return Net is LoopbackClient;
+#else
+                return false;
+#endif
+            }
+        }
+
+        /// <summary>端末ごとの識別子。再読み込みしても同じ参加者に戻れる。デバッグモードでは使い捨て。</summary>
         static string ClientToken
         {
             get
             {
-                // ブラウザ（端末）ごとの識別子。再読み込みしても同じ席に戻れるようにする
+                if (DebugSession.Enabled) return DebugSession.Token;
                 var t = PlayerPrefs.GetString(TokenKey, "");
                 if (string.IsNullOrEmpty(t))
                 {
@@ -83,74 +109,148 @@ namespace GunjinShogi.UnityView
             }
         }
 
+        static string LastRoom
+        {
+            get => DebugSession.Enabled ? "" : PlayerPrefs.GetString(LastRoomKey, "");
+            set
+            {
+                if (DebugSession.Enabled) return;
+                if (string.IsNullOrEmpty(value)) PlayerPrefs.DeleteKey(LastRoomKey);
+                else PlayerPrefs.SetString(LastRoomKey, value);
+                PlayerPrefs.Save();
+            }
+        }
+
+        static byte[] NameBytes => Encoding.UTF8.GetBytes(PlayerName.Value ?? "");
+
         // ───────── 画面の組み立て ─────────
 
         void BuildOnline()
         {
             var content = setupRow.transform.parent;
-            waitRow = ButtonRow(content, Ui.Button("LeaveRoom", null, "部屋を出る", LeaveOnline, Ui.ButtonStyle.Danger));
+            waitAbortButton = Ui.Button("AbortWait", null, "中断", OnAbortSetup, Ui.ButtonStyle.Danger);
+            waitRow = ButtonRow(content, waitAbortButton, Ui.Button("LeaveRoom", null, "部屋を出る", LeaveOnline, Ui.ButtonStyle.Danger));
+            spectateToggle = Ui.Button("SpectateShow", null, "", CycleSpectatorShow);
+            spectateRow = ButtonRow(content, spectateToggle, Ui.Button("LeaveSpectate", null, "部屋を出る", LeaveOnline, Ui.ButtonStyle.Danger));
             claimWinButton = Ui.Button("ClaimWin", playRow.transform, "勝ちを申請", () => Net?.SendPacket(Packet.Of(Op.ClaimWin)), Ui.ButtonStyle.Primary);
             claimWinButton.gameObject.SetActive(false);
             againButton = resultRow.transform.Find("Again").GetComponent<Button>();
 
-            var (root, card) = Ui.Modal("Lobby", canvasRect, 0.5f, 0.86f);
+            BuildLobby();
+
+            roomScreen = new RoomScreen(canvasRect)
+            {
+                TakeSeat = s => Net?.SendPacket(Packet.Of(Op.TakeSeat, s)),
+                SetReady = r => Net?.SendPacket(Packet.Of(Op.SetReady, r ? 1 : 0)),
+                StartGame = () => Net?.SendPacket(Packet.Of(Op.StartGame)),
+                SetOpen = o => Net?.SendPacket(Packet.Of(Op.SetVisibility, o ? 1 : 0)),
+                TransferOwner = id => Net?.SendPacket(Packet.Of(Op.TransferOwner, id)),
+                EditRules = OpenRoomRules,
+                OpenDisplaySettings = () => rulesScreen.OpenFor(currentOptions ?? AppSettings.Rules, false, null, () => display = AppSettings.Display, false),
+                Rename = name =>
+                {
+                    PlayerName.Value = name;
+                    if (!string.IsNullOrEmpty(PlayerName.Value)) Net?.SendPacket(Packet.Of(Op.SetName, s1: PlayerName.Value));
+                },
+                Invite = CopyInvite,
+                Leave = LeaveOnline,
+            };
+
+            debugBadge = Ui.Text("DebugBadge", canvasRect, "", 26, Theme.Hex("E0705A"), bold: true);
+            Ui.Anchors(debugBadge.rectTransform, 0, 1, 0, 1);
+            debugBadge.rectTransform.pivot = new Vector2(0, 1);
+            debugBadge.rectTransform.anchoredPosition = new Vector2(16, -10);
+            debugBadge.rectTransform.sizeDelta = new Vector2(1400, 40);
+            debugBadge.textWrappingMode = TextWrappingModes.NoWrap;
+            debugBadge.gameObject.SetActive(false);
+        }
+
+        void BuildLobby()
+        {
+            var (root, card) = Ui.Modal("Lobby", canvasRect, 0.5f, 0.92f);
             lobbyRoot = root;
-            Ui.Column(card, 14);
-            Ui.Size(Ui.Text("Title", card, "オンライン対戦", 46, Theme.Text, bold: true), 64);
-            lobbyStatus = Ui.Text("Status", card, "", 26, Theme.TextMuted);
-            Ui.Size(lobbyStatus, 40);
+            Ui.Column(card, 10);
+            Ui.Size(Ui.Text("Title", card, "オンライン対戦", 44, Theme.Text, bold: true), 58);
+            lobbyStatus = Ui.Text("Status", card, "", 24, Theme.TextMuted);
+            Ui.Size(lobbyStatus, 34);
+
+            var nameRow = Ui.Rect("NameRow", card);
+            Ui.RowGroup(nameRow, 12);
+            Ui.Size(nameRow, 60);
+            var nameLabel = Ui.Text("NameLabel", nameRow, "名前", 26, Theme.TextMuted);
+            Ui.Size(nameLabel, -1, 90);
+            lobbyNameInput = Ui.InputField("Name", nameRow, "あなたの名前（12文字まで）", 28);
+            lobbyNameInput.characterLimit = RoomService.MaxNameLength;
+            lobbyNameInput.onEndEdit.AddListener(v => PlayerName.Value = v);
+            Ui.Size(lobbyNameInput, -1, 300, 1);
 
             Section(card, "部屋を作る");
-            lobbyRules = Ui.Text("Rules", card, "", 24, Theme.TextMuted);
-            Ui.Size(lobbyRules, 64);
-            Ui.AutoSize(lobbyRules, 24);
-            lobbyCreate = Ui.Button("Create", card, "部屋を作る", CreateRoom, Ui.ButtonStyle.Primary, 32);
-            Ui.Size(lobbyCreate, 80);
+            var createRow = Ui.Rect("CreateRow", card);
+            Ui.RowGroup(createRow, 12);
+            Ui.Size(createRow, 70);
+            lobbyOpenButton = Ui.Button("Open", createRow, "オープン", () => SetCreateOpen(true), fontSize: 26);
+            Ui.Size(lobbyOpenButton, -1, 170);
+            lobbyPrivateButton = Ui.Button("Private", createRow, "プライベート", () => SetCreateOpen(false), fontSize: 26);
+            Ui.Size(lobbyPrivateButton, -1, 200);
+            lobbyCreate = Ui.Button("Create", createRow, "部屋を作る", CreateRoom, Ui.ButtonStyle.Primary, 30);
+            Ui.Size(lobbyCreate, -1, 200, 1);
+            var createNote = Ui.Text("CreateNote", card, "オープン：下の一覧に出て誰でも入れます。プライベート：部屋番号を知っている人だけが入れます。ルールは部屋の中で決めます。", 21, Theme.TextMuted);
+            Ui.Size(createNote, 54);
+            Ui.AutoSize(createNote, 21);
 
-            Section(card, "部屋に入る");
+            Section(card, "部屋番号で入る");
             var joinRow = Ui.Rect("JoinRow", card);
-            Ui.RowGroup(joinRow, 14);
-            Ui.Size(joinRow, 76);
-            lobbyCodeInput = Ui.InputField("Code", joinRow, "部屋番号（4桁）", 34);
+            Ui.RowGroup(joinRow, 12);
+            Ui.Size(joinRow, 66);
+            lobbyCodeInput = Ui.InputField("Code", joinRow, "部屋番号（4桁）", 30);
             lobbyCodeInput.contentType = TMP_InputField.ContentType.IntegerNumber;
             lobbyCodeInput.characterLimit = 4;
             Ui.Size(lobbyCodeInput, -1, 240, 1);
-            lobbyJoin = Ui.Button("Join", joinRow, "入る", () => JoinRoom(lobbyCodeInput.text), fontSize: 32);
-            Ui.Size(lobbyJoin, -1, 200);
+            lobbyJoin = Ui.Button("Join", joinRow, "入る", () => JoinRoom(lobbyCodeInput.text), fontSize: 30);
+            Ui.Size(lobbyJoin, -1, 180);
+            lobbyRejoin = Ui.Button("Rejoin", card, "", () => JoinRoom(LastRoom), Ui.ButtonStyle.Primary, 26);
+            Ui.Size(lobbyRejoin, 62);
+            lobbyRejoin.gameObject.SetActive(false);
 
-            lobbyRejoin = Ui.Button("Rejoin", card, "", () => JoinRoom(PlayerPrefs.GetString(LastRoomKey, "")), fontSize: 28);
-            Ui.Size(lobbyRejoin, 70);
+            Section(card, "オープンの部屋");
+            lobbyListNote = Ui.Text("ListNote", card, "", 22, Theme.TextMuted);
+            Ui.Size(lobbyListNote, 30);
+            var listHost = Ui.Image("List", card, Theme.Hex("20251F"));
+            var le = Ui.Size(listHost);
+            le.flexibleHeight = 1;
+            le.minHeight = 120;
+            roomListContent = Ui.ScrollArea("Scroll", listHost.transform, out _);
+            Ui.Stretch((RectTransform)roomListContent.parent.parent, 10, 8, 10, 8);
+            Ui.Column(roomListContent, 6);
 
 #if UNITY_EDITOR
-            lobbyDev = Ui.Button("DevHost", card, "（エディタ）部屋を作り、相手役ボットを入れる", StartDevHost, fontSize: 24);
-            Ui.Size(lobbyDev, 60);
+            lobbyDev = Ui.Button("DevHost", card, "（エディタ）部屋を作り、相手役ボットを入れる", StartDevHost, fontSize: 22);
+            Ui.Size(lobbyDev, 52);
 #endif
-            lobbyMessage = Ui.Text("Message", card, "", 26, Theme.TextMuted);
-            Ui.Size(lobbyMessage, 70);
-            Ui.AutoSize(lobbyMessage, 26);
-
-            var spacer = Ui.Size(Ui.Rect("Spacer", card));
-            spacer.flexibleHeight = 1;
-            var close = Ui.Button("CloseLobby", card, "閉じる", CloseLobby, fontSize: 30);
-            Ui.Size(close, 76);
+            lobbyMessage = Ui.Text("Message", card, "", 24, Theme.TextMuted);
+            Ui.Size(lobbyMessage, 40);
+            Ui.AutoSize(lobbyMessage, 24);
+            var close = Ui.Button("CloseLobby", card, "閉じる", CloseLobby, fontSize: 28);
+            Ui.Size(close, 66);
         }
 
         static void Section(Transform parent, string text)
         {
-            var h = Ui.Text("Section", parent, text, 26, Theme.Brass, bold: true);
-            Ui.Size(h, 44);
+            var h = Ui.Text("Section", parent, text, 24, Theme.Brass, bold: true);
+            Ui.Size(h, 36);
             h.alignment = TextAlignmentOptions.BottomLeft;
         }
 
         void ApplyOnlineOrientation(bool landscape)
         {
+            roomScreen?.ApplyOrientation(landscape);
             if (lobbyRoot == null) return;
             var card = (RectTransform)lobbyRoot.transform.GetChild(0);
-            if (landscape) Ui.Anchors(card, 0.25f, 0.05f, 0.75f, 0.95f);
-            else Ui.Anchors(card, 0.03f, 0.12f, 0.97f, 0.88f);
+            if (landscape) Ui.Anchors(card, 0.22f, 0.03f, 0.78f, 0.97f);
+            else Ui.Anchors(card, 0.03f, 0.06f, 0.97f, 0.94f);
         }
 
-        // ───────── ロビー ─────────
+        // ───────── ロビー（部屋の外） ─────────
 
         void OpenLobby()
         {
@@ -159,16 +259,15 @@ namespace GunjinShogi.UnityView
                 titleRulesText.text = "<color=#E0705A>通信の設定（GunjinNetworkManager）がシーンにありません</color>";
                 return;
             }
-            var o = AppSettings.Rules;
-            lobbyRules.text = $"今のルール（{RulesScreen.Summary(o)}・コード {RuleCodec.Encode(o)}）で部屋を作ります。表示される部屋番号を相手に伝えてください。";
             lobbyMessage.text = "";
-            string last = PlayerPrefs.GetString(LastRoomKey, "");
-            lobbyRejoin.gameObject.SetActive(!string.IsNullOrEmpty(last));
-            Ui.SetLabel(lobbyRejoin, $"前の対局に戻る（部屋 {last}）");
+            lobbyNameInput.text = PlayerName.Value;
             if (lobbyDev != null) lobbyDev.gameObject.SetActive(IsLoopback);
+            lobbyRejoin.gameObject.SetActive(false);
+            SetCreateOpen(PlayerPrefs.GetInt(OpenKey, 1) != 0);
+            ClearRoomList("サーバーに接続しています…");
             lobbyRoot.SetActive(true);
             lobbyRoot.transform.SetAsLastSibling();
-            EnsureConnected(null);
+            EnsureConnected(RequestRoomList);
             RefreshLobby();
         }
 
@@ -177,6 +276,14 @@ namespace GunjinShogi.UnityView
             lobbyRoot.SetActive(false);
             onConnected = null;
             if (!online && Net != null) Net.Disconnect();
+        }
+
+        void SetCreateOpen(bool open)
+        {
+            PlayerPrefs.SetInt(OpenKey, open ? 1 : 0);
+            PlayerPrefs.Save();
+            Ui.SetSelected(lobbyOpenButton, open);
+            Ui.SetSelected(lobbyPrivateButton, !open);
         }
 
         void RefreshLobby()
@@ -205,38 +312,72 @@ namespace GunjinShogi.UnityView
             RefreshLobby();
         }
 
+        void RequestRoomList()
+        {
+            nextListAt = Time.unscaledTime + ListInterval;
+            Net?.SendPacket(Packet.Of(Op.ListRooms, Packet.ProtocolVersion, s1: LastRoom, s2: ClientToken));
+        }
+
+        void ClearRoomList(string note)
+        {
+            foreach (var r in roomListRows) Destroy(r);
+            roomListRows.Clear();
+            lobbyListNote.text = note;
+        }
+
+        void OnRoomList(Packet p)
+        {
+            RoomListInfo list;
+            try { list = RoomListInfo.Decode(p.Data); } catch (Exception) { return; }
+
+            // 前の部屋：サーバーに残っているときだけ「戻る」を出す（消えた部屋は記録ごと消す）
+            string last = LastRoom;
+            bool canRejoin = list.CanRejoin && !string.IsNullOrEmpty(last);
+            if (!list.CanRejoin && !string.IsNullOrEmpty(last)) LastRoom = "";
+            lobbyRejoin.gameObject.SetActive(canRejoin);
+            if (canRejoin) Ui.SetLabel(lobbyRejoin, $"前の対局に戻る（部屋 {last}）");
+
+            if (lobbyRoot == null || !lobbyRoot.activeSelf) return;
+            ClearRoomList(list.Rooms.Count == 0 ? "いまオープンの部屋はありません。部屋を作ってみましょう。" : "押すと入ります。対局中の部屋は観戦になります。");
+            foreach (var e in list.Rooms)
+            {
+                var code = e.Code;
+                string players = e.First.Length + e.Second.Length == 0 ? "対局者なし" : $"{Or(e.First)} 対 {Or(e.Second)}";
+                RuleCodec.TryDecode(e.RuleCode, out var o);
+                string phase = e.Phase == RoomPhase.Lobby ? "<color=#8FBF7A>準備中</color>" : "<color=#E3B341>対局中</color>";
+                string label = $"<b>{code}</b>　{phase}　{players}　<color=#A39D88>部屋主 {e.OwnerName}・{RulesScreen.Summary(o ?? new StandardRuleOptions())}・{e.Members}人</color>";
+                var b = Ui.Button("Room" + code, roomListContent, label, () => JoinRoom(code), fontSize: 24);
+                b.GetComponentInChildren<TextMeshProUGUI>().alignment = TextAlignmentOptions.MidlineLeft;
+                Ui.Size(b, 60);
+                roomListRows.Add(b.gameObject);
+            }
+        }
+
+        static string Or(string name) => string.IsNullOrEmpty(name) ? "（空席）" : name;
+
         void CreateRoom()
         {
+            PlayerName.Value = lobbyNameInput.text;
             lobbyMessage.text = "部屋を作っています…";
+            bool open = PlayerPrefs.GetInt(OpenKey, 1) != 0;
             var code = RuleCodec.Encode(AppSettings.Rules);
-            EnsureConnected(() => Net.SendPacket(Packet.Of(Op.CreateRoom, Packet.ProtocolVersion, s1: ClientToken, s2: code)));
+            EnsureConnected(() => Net.SendPacket(Packet.Of(Op.CreateRoom, Packet.ProtocolVersion, open ? 1 : 0, s1: ClientToken, s2: code, data: NameBytes)));
         }
 
         void JoinRoom(string code)
         {
             code = (code ?? "").Trim();
             if (code.Length != 4) { lobbyMessage.text = "<color=#E0705A>部屋番号は4桁の数字です</color>"; return; }
+            if (lobbyNameInput != null && lobbyRoot.activeSelf) PlayerName.Value = lobbyNameInput.text;
             lobbyMessage.text = "部屋に入っています…";
-            EnsureConnected(() => Net.SendPacket(Packet.Of(Op.JoinRoom, Packet.ProtocolVersion, s1: ClientToken, s2: code)));
+            EnsureConnected(() => Net.SendPacket(Packet.Of(Op.JoinRoom, Packet.ProtocolVersion, s1: ClientToken, s2: code, data: NameBytes)));
         }
 
-void StartDevHost()
+        void StartDevHost()
         {
-            // 模擬サーバーで部屋を作り、入れたら相手役を呼ぶ（EnterOnlineRoom で）
+            // 模擬サーバーで部屋を作り、入れたら相手役を呼ぶ（OnRoomJoined で）
             devBotPending = true;
             CreateRoom();
-        }
-
-        bool IsLoopback
-        {
-            get
-            {
-#if UNITY_EDITOR
-                return Net is LoopbackClient;
-#else
-                return false;
-#endif
-            }
         }
 
         // ───────── 通信イベント ─────────
@@ -246,10 +387,10 @@ void StartDevHost()
             reconnectTries = 0;
             if (reconnecting)
             {
-                // 対局中に切れた場合は、同じ部屋に同じトークンで入り直す（サーバーが席と盤面を返す）
+                // 切れた場合は、同じ部屋に同じトークンで入り直す（サーバーが席と盤面を返す）
                 reconnecting = false;
                 rejoinPending = true;
-                Net.SendPacket(Packet.Of(Op.JoinRoom, Packet.ProtocolVersion, s1: ClientToken, s2: roomCode));
+                Net.SendPacket(Packet.Of(Op.JoinRoom, Packet.ProtocolVersion, s1: ClientToken, s2: roomCode, data: NameBytes));
             }
             var a = onConnected;
             onConnected = null;
@@ -270,11 +411,15 @@ void StartDevHost()
                 inputMode = InputMode.None;
                 statusText.text = "接続が切れました";
                 subText.text = "再接続しています…";
+                roomScreen.ShowNotice("<color=#E0705A>接続が切れました。再接続しています…</color>");
             }
         }
 
         void Update()
         {
+            CheckDebugHotkey();
+            roomScreen?.Tick();
+
             if (reconnecting && Time.unscaledTime >= reconnectAt && Net != null && !Net.IsConnecting && !Net.IsClientConnected)
             {
                 if (++reconnectTries > 20)
@@ -290,11 +435,45 @@ void StartDevHost()
                 }
             }
 
+            // 部屋の一覧はロビーを開いている間だけ、数秒ごとに取り直す
+            if (lobbyRoot != null && lobbyRoot.activeSelf && Net != null && Net.IsClientConnected && Time.unscaledTime >= nextListAt)
+                RequestRoomList();
+
             // 相手が長く切断していたら「勝ちを申請」を出す
             if (online && onlineView != null && onlineView.Phase == GamePhase.Playing && claimWinButton != null)
             {
-                bool canClaim = opponentLeftAt >= 0 && NetClock.Now - opponentLeftAt >= RoomService.ClaimWinAfterSeconds;
+                bool canClaim = MySeat >= 0 && opponentLeftAt >= 0 && NetClock.Now - opponentLeftAt >= RoomService.ClaimWinAfterSeconds;
                 if (claimWinButton.gameObject.activeSelf != canClaim) claimWinButton.gameObject.SetActive(canClaim);
+            }
+
+            if (debugBadge != null && debugBadge.gameObject.activeSelf && debugBadge.transform.GetSiblingIndex() != debugBadge.transform.parent.childCount - 1)
+                debugBadge.transform.SetAsLastSibling();
+        }
+
+        /// <summary>Ctrl+Shift+F8：デバッグモードの切り替え（部屋に入っていないときだけ）。</summary>
+        void CheckDebugHotkey()
+        {
+#if ENABLE_INPUT_SYSTEM
+            var kb = UnityEngine.InputSystem.Keyboard.current;
+            if (kb == null || !kb.f8Key.wasPressedThisFrame) return;
+            if (!(kb.ctrlKey.isPressed && kb.shiftKey.isPressed)) return;
+#else
+            if (!(Input.GetKeyDown(KeyCode.F8) && Input.GetKey(KeyCode.LeftControl) && Input.GetKey(KeyCode.LeftShift))) return;
+#endif
+            if (online)
+            {
+                roomScreen.ShowNotice("デバッグモードは部屋を出てから切り替えてください");
+                return;
+            }
+            DebugSession.Toggle();
+            debugBadge.text = DebugSession.Enabled
+                ? $"DEBUG　この画面は別の人（{PlayerName.Value}）として入ります　Ctrl+Shift+F8 で解除"
+                : "";
+            debugBadge.gameObject.SetActive(DebugSession.Enabled);
+            if (lobbyRoot.activeSelf)
+            {
+                lobbyNameInput.text = PlayerName.Value;
+                if (Net != null && Net.IsClientConnected) RequestRoomList();
             }
         }
 
@@ -303,11 +482,13 @@ void StartDevHost()
             switch (p.Op)
             {
                 case Op.Error: OnServerError(p); break;
-                case Op.RoomJoined: EnterOnlineRoom(p.S1, p.A, p.S2); break;
-                case Op.RoomStatus: OnRoomStatus(p); break;
+                case Op.Notice: OnNotice(p.S1); break;
+                case Op.RoomJoined: OnRoomJoined(p); break;
+                case Op.RoomState: OnRoomState(p); break;
                 case Op.Snapshot: OnSnapshot(ViewCodec.Decode(p.Data)); break;
                 case Op.MoveMade: OnMoveMade(p); break;
                 case Op.GameOver: OnGameOver(p); break;
+                case Op.RoomList: OnRoomList(p); break;
             }
         }
 
@@ -315,116 +496,154 @@ void StartDevHost()
         {
             string msg = $"<color=#E0705A>{p.S1}</color>";
             if (lobbyRoot.activeSelf) lobbyMessage.text = msg;
+            else if (roomScreen.IsOpen) roomScreen.ShowNotice(msg);
             else subText.text = msg;
 
             if (p.A == 1) { LeaveOnline(); titleRulesText.text = msg; return; }
-            // 部屋が無くなっていた場合は「前の対局に戻る」を消す
-            if (p.S1.Contains("部屋はありません")) { PlayerPrefs.DeleteKey(LastRoomKey); lobbyRejoin.gameObject.SetActive(false); }
-            if (online && rejoinPending && p.S1.Contains("部屋はありません"))
+            if (p.S1.Contains("部屋はありません"))
             {
-                // 再接続したら部屋が消えていた（サーバーの再起動など）。対局はもう続けられない
-                rejoinPending = false;
-                inputMode = InputMode.None;
-                claimWinButton.gameObject.SetActive(false);
-                statusText.text = "部屋がなくなりました";
-                subText.text = "サーバーが再起動したなどの理由で、この部屋は閉じられました。" + (replayFinalView != null ? "感想戦は見られます。" : "タイトルに戻って部屋を作り直してください。");
-                if (replayFinalView != null) { againButton.interactable = false; ShowRow(resultRow); }
-                else ShowRow(waitRow);
+                LastRoom = "";
+                lobbyRejoin.gameObject.SetActive(false);
+                if (online && rejoinPending)
+                {
+                    // 再接続したら部屋が消えていた（サーバーの再起動など）
+                    rejoinPending = false;
+                    bool canReplay = replayFinalView != null;
+                    online = false;
+                    roomScreen.Hide();
+                    inputMode = InputMode.None;
+                    claimWinButton.gameObject.SetActive(false);
+                    if (!canReplay) { LeaveOnline(); titleRulesText.text = "<color=#E0705A>サーバーが再起動したなどの理由で、部屋が閉じられました。</color>"; return; }
+                    statusText.text = "部屋がなくなりました";
+                    subText.text = "サーバーが再起動したなどの理由で、この部屋は閉じられました。感想戦は見られます。";
+                    againButton.interactable = false;
+                    ShowRow(resultRow);
+                }
                 return;
             }
             // 配置の提出が拒否されたら並べ直せるようにする
-            if (online && onlinePhase == RoomPhase.Setup && onlineSetupActive && (onlineFlags & StatusFlags.MySetupDone) == 0)
+            if (online && onlineSetupActive && roomInfo != null && roomInfo.Phase == RoomPhase.Setup && MySeat >= 0 && !roomInfo.SetupDone[MySeat])
                 inputMode = InputMode.Setup;
         }
 
-        void EnterOnlineRoom(string code, int seat, string ruleCode)
+        void OnNotice(string text)
+        {
+            if (roomScreen.IsOpen) roomScreen.ShowNotice(text);
+            else if (online) subText.text = text;
+        }
+
+        // ───────── 部屋 ─────────
+
+        void OnRoomJoined(Packet p)
         {
             if (matchRoutine != null) StopCoroutine(matchRoutine);
             matchRoutine = null;
-            bool sameGame = rejoinPending && online && roomCode == code && onlineSeat == seat && rules != null;
+            bool sameRoom = online && roomCode == p.S1 && myId == p.A;
             rejoinPending = false;
-            roomCode = code;
-            onlineSeat = seat;
-            PlayerPrefs.SetString(LastRoomKey, code);
-            PlayerPrefs.Save();
+            roomCode = p.S1;
+            myId = p.A;
+            LastRoom = roomCode;
 
             lobbyRoot.SetActive(false);
             titleScreen.SetActive(false);
+            matchSetup.Close();
             online = true;
             leavingOnline = false;
-            if (sameGame)
+            if (!sameRoom)
             {
-                // 再接続：対局中の盤面はこの後の Snapshot で揃う。配置中なら並べかけのまま続ける
-                if (onlineSetupActive) { inputMode = InputMode.Setup; ShowRow(setupRow); }
-                return;
+                roomInfo = null;
+                onlineView = null;
+                onlineMoveState = null;
+                onlineSetupActive = false;
+                showingResult = false;
+                spectatorShow = 2;
+                opponentLeftAt = -1;
+                replaySetups[0] = replaySetups[1] = null;
+                replayFinalView = null;
+                display = AppSettings.Display;
+                for (int i = 0; i < 2; i++) { memos[i].Clear(); beliefs[i] = null; }
+                board.ClearStamps();
+                ClearMarks();
+                SetMemoMode(false);
+                logText.text = "";
             }
-
-            RuleCodec.TryDecode(ruleCode, out var options);
-            currentOptions = options ?? new StandardRuleOptions();
-            display = AppSettings.Display;
-            rules = StandardRules.Create23(currentOptions);
-            topo = new BoardTopology(rules.Board);
-            viewer = seat;
-            onlineView = null;
-            onlineMoveState = null;
-            onlineSetupActive = false;
-            onlinePhase = RoomPhase.Setup;
-            onlineFlags = StatusFlags.None;
-            onlineResult = GameResult.Ongoing;
-            onlineReason = EndReason.None;
-            opponentLeftAt = -1;
-            replaySetups[0] = replaySetups[1] = null;
-            replayFinalView = null;
-            for (int p = 0; p < 2; p++) { memos[p].Clear(); beliefs[p] = null; }
-            board.Init(rules, seat);
-            board.ClearStamps();
-            ClearMarks();
-            SetMemoMode(false);
-            logText.text = "";
-            headerText.text = $"部屋 <color=#E3B341>{code}</color>";
-            SetInviteVisible(true);
-            string me = "あなた", them = "相手";
-            teamsText.text = $"<color=#{ColorUtility.ToHtmlStringRGB(Color.Lerp(Theme.Team[0], Color.white, 0.35f))}>■ 朱</color> {(seat == 0 ? me : them)}（先手）　　" +
-                             $"<color=#{ColorUtility.ToHtmlStringRGB(Color.Lerp(Theme.Team[1], Color.white, 0.45f))}>■ 藍</color> {(seat == 1 ? me : them)}（後手）";
-            statusText.text = "部屋に入りました";
-            subText.text = "";
 
             if (devBotPending)
             {
                 devBotPending = false;
 #if UNITY_EDITOR
-                if (IsLoopback) EditorLoopback.Instance.AddBot(code, EditorLoopback.DefaultBotMode);
+                if (IsLoopback) EditorLoopback.Instance.AddBot(roomCode, EditorLoopback.DefaultBotMode);
 #endif
             }
         }
 
-        void OnRoomStatus(Packet p)
-        {
-            onlinePhase = (RoomPhase)p.A;
-            onlineFlags = (StatusFlags)p.B;
-            bool opponentAway = (onlineFlags & StatusFlags.OpponentJoined) != 0 && (onlineFlags & StatusFlags.OpponentPresent) == 0;
-            opponentLeftAt = opponentAway ? NetClock.Now - p.C : -1;
-            RefreshOnlineStatus();
-        }
-
-        void RefreshOnlineStatus()
+        void OnRoomState(Packet p)
         {
             if (!online) return;
-            bool opponentJoined = (onlineFlags & StatusFlags.OpponentJoined) != 0;
-            // 途中から入れるのは配置中だけなので、招待は相手が来るまで
-            SetInviteVisible(onlinePhase == RoomPhase.Setup && !opponentJoined);
-            switch (onlinePhase)
+            RoomInfo info;
+            try { info = RoomInfo.Decode(p.Data); } catch (Exception) { return; }
+            var prev = roomInfo;
+            roomInfo = info;
+
+            if (prev == null || prev.RuleCode != info.RuleCode || rules == null)
             {
+                RuleCodec.TryDecode(info.RuleCode, out var options);
+                currentOptions = options ?? new StandardRuleOptions();
+                rules = StandardRules.Create23(currentOptions);
+                topo = new BoardTopology(rules.Board);
+                board.Init(rules, Math.Max(0, MySeat));
+            }
+
+            // 相手の対局者の切断
+            int seat = MySeat;
+            opponentLeftAt = seat >= 0 && info.AbsentSeconds[1 - seat] >= 0 ? NetClock.Now - info.AbsentSeconds[1 - seat] : -1;
+
+            bool newGame = info.Phase == RoomPhase.Setup && (prev == null || prev.Phase != RoomPhase.Setup);
+            if (newGame)
+            {
+                showingResult = false;
+                onlineView = null;
+                onlineMoveState = null;
+                onlineSetupActive = false;
+                for (int i = 0; i < 2; i++) { memos[i].Clear(); beliefs[i] = null; }
+                board.Init(rules, Math.Max(0, seat));
+                board.ClearStamps();
+                logText.text = "";
+                spectatorShow = 2;
+            }
+
+            headerText.text = $"部屋 <color=#E3B341>{info.Code}</color>";
+            teamsText.text = TeamsLineOnline();
+            UpdateOnlineScreen();
+        }
+
+        /// <summary>今の部屋の段階と自分の立場から、出す画面を決める。</summary>
+        void UpdateOnlineScreen()
+        {
+            if (!online || roomInfo == null) return;
+            int seat = MySeat;
+            switch (roomInfo.Phase)
+            {
+                case RoomPhase.Lobby:
+                    onlineSetupActive = false;
+                    presetPanel.Close();
+                    if (showingResult)
+                    {
+                        if (inputMode != InputMode.Replay) ShowOnlineResult();
+                        roomScreen.Hide();
+                    }
+                    else ShowRoomScreen();
+                    break;
+
                 case RoomPhase.Setup:
-                    if ((onlineFlags & StatusFlags.MySetupDone) == 0)
+                    if (seat < 0) { ShowRoomScreen(); break; }
+                    roomScreen.Hide();
+                    if (!roomInfo.SetupDone[seat])
                     {
                         if (!onlineSetupActive) BeginOnlineSetup();
                         statusText.text = "駒を配置する";
-                        // 標準と違うルールの部屋なら、配置の前に気づけるようにする
-                        string ruleNote = RuleCodec.DiffCount(currentOptions) > 0 ? $"<color=#E3B341>この部屋のルール：{RulesScreen.Summary(currentOptions)}（「ルール」で確認）</color>\n" : "";
-                        subText.text = ruleNote + (opponentJoined
-                            ? ((onlineFlags & StatusFlags.OpponentSetupDone) != 0 ? "相手は配置を終えました。" : "対戦相手がそろいました。") + HintSetup
-                            : $"相手を待つ間に配置できます。部屋番号 <b><size=130%>{roomCode}</size></b> を相手に伝えてください（「招待」でコピーできます）。");
+                        string other = roomInfo.SetupDone[1 - seat] ? "相手は配置を終えました。" : "";
+                        subText.text = other + HintSetup;
                     }
                     else
                     {
@@ -432,18 +651,54 @@ void StartDevHost()
                         inputMode = InputMode.None;
                         presetPanel.Close();
                         ShowRow(waitRow);
-                        statusText.text = opponentJoined ? "相手の配置を待っています" : "相手の参加を待っています";
-                        subText.text = opponentJoined ? "配置は決定しました。" : $"部屋番号 <b><size=130%>{roomCode}</size></b> を相手に伝えてください（「招待」でコピーできます）。";
+                        waitAbortButton.gameObject.SetActive(true);
+                        statusText.text = "相手の配置を待っています";
+                        subText.text = "配置は決定しました。";
                     }
                     break;
+
                 case RoomPhase.Playing:
-                    UpdateOnlineTurn();
-                    break;
-                case RoomPhase.Finished:
-                    if (onlineView != null && onlineView.Phase == GamePhase.Finished && inputMode != InputMode.Replay) ShowOnlineResult();
+                    roomScreen.Hide();
+                    onlineSetupActive = false;
+                    if (onlineView != null) UpdateOnlineTurn();
                     break;
             }
         }
+
+        void ShowRoomScreen()
+        {
+            inputMode = InputMode.None;
+            SetMemoMode(false);
+            presetPanel.Close();
+            roomScreen.Refresh(roomInfo, myId, RulesScreen.Summary(currentOptions));
+            if (!roomScreen.IsOpen) roomScreen.Show(string.IsNullOrEmpty(PlayerName.Value) ? roomInfo.NameOf(myId) : PlayerName.Value);
+        }
+
+        void OpenRoomRules()
+        {
+            if (roomInfo == null) return;
+            if (IsOwner && roomInfo.Phase == RoomPhase.Lobby)
+                rulesScreen.OpenFor(currentOptions, true,
+                    o => Net?.SendPacket(Packet.Of(Op.SetRules, s1: RuleCodec.Encode(o))),
+                    () => display = AppSettings.Display, true);
+            else if (rules != null)
+                info.OpenRules(rules, currentOptions);
+        }
+
+        string TeamsLineOnline()
+        {
+            string Name(int s)
+            {
+                int id = roomInfo.SeatMember[s];
+                if (id == RoomInfo.NoSeat) return "（空席）";
+                return roomInfo.NameOf(id) + (id == myId ? "（あなた）" : "");
+            }
+            return $"<color=#{ColorUtility.ToHtmlStringRGB(Color.Lerp(Theme.Team[0], Color.white, 0.35f))}>■ 朱</color> {Name(0)}　" +
+                   $"<color=#{ColorUtility.ToHtmlStringRGB(Color.Lerp(Theme.Team[1], Color.white, 0.45f))}>■ 藍</color> {Name(1)}" +
+                   (IsSpectator ? "　<color=#A39D88>観戦中</color>" : "");
+        }
+
+        // ───────── 配置 ─────────
 
         void BeginOnlineSetup()
         {
@@ -451,9 +706,11 @@ void StartDevHost()
             onlineView = null;
             onlineMoveState = null;
             board.ClearStamps();
-            setupPlayer = onlineSeat;
+            setupPlayer = MySeat;
+            viewer = MySeat;
+            board.SetViewer(viewer);
             // ローカルと同じく、総司令部まわりを固めた配置を初期値にする
-            setupPlacements = new Core.Ai.CpuPlayer(rules, onlineSeat, Environment.TickCount).ChooseSetup();
+            setupPlacements = new Core.Ai.CpuPlayer(rules, setupPlayer, Environment.TickCount).ChooseSetup();
             selectedNode = -1;
             inputMode = InputMode.Setup;
             ShowRow(setupRow);
@@ -466,8 +723,10 @@ void StartDevHost()
             if (inputMode != InputMode.Setup) return;
             inputMode = InputMode.None;
             subText.text = "配置を送っています…";
-            Net.SendPacket(Packet.Of(Op.SubmitSetup, s1: SetupCodec.Encode(topo, onlineSeat, setupPlacements)));
+            Net.SendPacket(Packet.Of(Op.SubmitSetup, s1: SetupCodec.Encode(topo, setupPlayer, setupPlacements)));
         }
+
+        // ───────── 対局 ─────────
 
         void OnSnapshot(PlayerView view)
         {
@@ -475,9 +734,12 @@ void StartDevHost()
             onlineView = view;
             onlineMoveState = view.ToMoveState(rules, topo);
             onlineSetupActive = false;
+            showingResult = false;
             presetPanel.Close();
+            roomScreen.Hide();
             selectedNode = -1;
-            if (view.Phase == GamePhase.Playing) onlinePhase = RoomPhase.Playing;
+            viewer = MySeat >= 0 ? MySeat : 0;
+            board.SetViewer(viewer);
             UpdateOnlineTurn();
         }
 
@@ -488,7 +750,8 @@ void StartDevHost()
             onlineView.ApplyMove(mv, p.A, (GameResult)p.B, (EndReason)p.C);
             onlineMoveState = onlineView.ToMoveState(rules, topo);
             selectedNode = -1;
-            var verdict = MoveLog.VerdictFor(mv, onlineSeat);
+            // 観戦者は攻めた側から見た結果の判を押す
+            var verdict = MoveLog.VerdictFor(mv, IsSpectator ? mv.Player : MySeat);
             if (verdict != MoveLog.Verdict.None) board.ShowStamp(mv.ToNode, ToStamp(verdict));
             if (onlineView.Phase == GamePhase.Playing) UpdateOnlineTurn();
             else RenderPlay(); // 終局の全公開は GameOver で届く
@@ -497,9 +760,23 @@ void StartDevHost()
         void UpdateOnlineTurn()
         {
             if (onlineView == null || onlineView.Phase != GamePhase.Playing) return;
+            teamsText.text = TeamsLineOnline();
+            if (IsSpectator)
+            {
+                inputMode = InputMode.None;
+                selectedNode = -1;
+                ShowRow(spectateRow);
+                RefreshSpectateToggle();
+                int turn = onlineView.CurrentPlayer;
+                statusText.text = $"観戦中　{Theme.TeamName[turn]}の番";
+                subText.text = $"{roomInfo.NameOf(roomInfo.SeatMember[turn])}さんが考えています。";
+                RenderPlay();
+                return;
+            }
+
             ShowRow(playRow);
             memoButton.gameObject.SetActive(display.MemoEnabled);
-            bool myTurn = onlineView.CurrentPlayer == onlineSeat;
+            bool myTurn = onlineView.CurrentPlayer == MySeat;
             bool opponentAway = opponentLeftAt >= 0;
             if (myTurn)
             {
@@ -528,6 +805,36 @@ void StartDevHost()
             Net.SendPacket(Packet.Of(Op.Move, move.PieceId, move.ToNode));
         }
 
+        // ───── 観戦者の表示 ─────
+
+        void CycleSpectatorShow()
+        {
+            spectatorShow = spectatorShow == 2 ? 0 : spectatorShow == 0 ? 1 : 2;
+            RefreshSpectateToggle();
+            RenderPlay();
+        }
+
+        void RefreshSpectateToggle()
+        {
+            Ui.SetLabel(spectateToggle, spectatorShow == 2 ? "表示：両方の駒" : spectatorShow == 0 ? "表示：先手の駒だけ" : "表示：後手の駒だけ");
+        }
+
+        /// <summary>盤に出す駒種。観戦中に片方だけを表示しているときは、もう片方を伏せる。</summary>
+        int DisplayType(Core.PieceView p)
+        {
+            if (online && IsSpectator && onlineView != null && onlineView.Phase == GamePhase.Playing && spectatorShow != 2 && p.Owner != spectatorShow)
+                return Visibility.HiddenType;
+            return p.TypeId;
+        }
+
+        int LogHiddenOwner(PlayerView view)
+        {
+            if (!online || !IsSpectator || view.Phase != GamePhase.Playing || spectatorShow == 2) return -1;
+            return 1 - spectatorShow;
+        }
+
+        // ───── 終局 ─────
+
         void OnGameOver(Packet p)
         {
             if (!online) return;
@@ -535,7 +842,9 @@ void StartDevHost()
             onlineMoveState = onlineView.ToMoveState(rules, topo);
             onlineResult = (GameResult)p.A;
             onlineReason = (EndReason)p.B;
-            onlinePhase = RoomPhase.Finished;
+            showingResult = true;
+            onlineSetupActive = false;
+            roomScreen.Hide();
 
             // 感想戦用：双方の配置と手順
             replaySetups[0] = SetupCodec.Decode(rules, topo, 0, p.S1);
@@ -554,34 +863,28 @@ void StartDevHost()
             claimWinButton.gameObject.SetActive(false);
             ShowRow(resultRow);
             RenderPlay();
+            int seat = MySeat;
             if (onlineResult == GameResult.Draw) statusText.text = "引き分け";
             else
             {
                 int winner = onlineResult == GameResult.Player0Win ? 0 : 1;
-                statusText.text = winner == onlineSeat ? "勝利" : "敗北";
+                statusText.text = seat < 0 || roomInfo == null ? $"{Theme.TeamName[winner]}の勝ち" : winner == seat ? "勝利" : "敗北";
             }
             string reason = MoveLog.Reason(onlineReason);
-            if (onlineReason == EndReason.Resign)
-                reason = (onlineResult == GameResult.Player0Win) == (onlineSeat == 0) ? "相手の投了・切断" : "投了";
-            bool iWant = (onlineFlags & StatusFlags.IWantRematch) != 0;
-            bool theyWant = (onlineFlags & StatusFlags.OpponentWantsRematch) != 0;
-            bool opponentHere = (onlineFlags & StatusFlags.OpponentPresent) != 0;
-            string rematch = iWant ? "　再戦を申し込みました。相手を待っています。"
-                : theyWant ? "　相手が再戦を希望しています。"
-                : !opponentHere ? "　相手は退出しました。" : "";
-            subText.text = $"{reason}（{onlineView.History.Count}手）。全ての駒を表にしています。{rematch}";
-            Ui.SetLabel(againButton, iWant ? "再戦待ち" : "再戦（先後交代）");
-            againButton.interactable = !iWant && opponentHere;
+            if (onlineReason == EndReason.Resign) reason = "投了・退出";
+            subText.text = $"{reason}（{onlineView.History.Count}手）。全ての駒を表にしています。「準備画面へ」で次の対局の準備に戻ります。";
+            Ui.SetLabel(againButton, "準備画面へ");
+            againButton.interactable = true;
         }
 
         // ───────── 招待 ─────────
 
         void SetInviteVisible(bool visible)
         {
-            if (inviteButton == null || inviteButton.gameObject.activeSelf == visible) return;
-            inviteButton.gameObject.SetActive(visible);
-            infoButtonsLayout.preferredWidth = visible ? 504 : 330;
-            Ui.SetLabel(inviteButton, "招待");
+            // 招待は準備画面にある。見出しの招待ボタンは使わない
+            if (inviteButton == null) return;
+            inviteButton.gameObject.SetActive(false);
+            infoButtonsLayout.preferredWidth = 330;
         }
 
         /// <summary>部屋番号（ブラウザなら直接入れるリンクも）をクリップボードへ。</summary>
@@ -593,16 +896,7 @@ void StartDevHost()
                 ? $"軍人将棋で対戦しましょう。部屋番号 {roomCode}\n{url}"
                 : $"軍人将棋で対戦しましょう。部屋番号 {roomCode}";
             bool ok = WebBridge.Copy(text);
-            Ui.SetLabel(inviteButton, ok ? "コピー済" : "失敗");
-            if (!ok) subText.text = $"コピーできませんでした。部屋番号 <b><size=130%>{roomCode}</size></b> を相手に伝えてください（「招待」でコピーできます）。";
-            StopCoroutine(nameof(ResetInviteLabel));
-            StartCoroutine(nameof(ResetInviteLabel));
-        }
-
-        System.Collections.IEnumerator ResetInviteLabel()
-        {
-            yield return new WaitForSecondsRealtime(2f);
-            if (inviteButton != null) Ui.SetLabel(inviteButton, "招待");
+            roomScreen.ShowNotice(ok ? "招待の文面をコピーしました。相手に送ってください。" : $"<color=#E0705A>コピーできませんでした。部屋番号 {roomCode} を相手に伝えてください。</color>");
         }
 
         void LeaveOnline()
@@ -610,10 +904,14 @@ void StartDevHost()
             leavingOnline = true;
             reconnecting = false;
             if (Net != null && Net.IsClientConnected) Net.SendPacket(Packet.Of(Op.LeaveRoom));
-            PlayerPrefs.DeleteKey(LastRoomKey);
+            LastRoom = "";
             online = false;
+            roomInfo = null;
+            myId = -1;
             onlineView = null;
             onlineMoveState = null;
+            showingResult = false;
+            roomScreen.Hide();
             claimWinButton.gameObject.SetActive(false);
             if (Net != null) Net.Disconnect();
             ShowTitle();
@@ -627,6 +925,12 @@ void StartDevHost()
             else setupConfirmed = true;
         }
 
+        void OnAbortSetup()
+        {
+            if (online) { Net?.SendPacket(Packet.Of(Op.AbortSetup)); return; }
+            ShowTitle();
+        }
+
         void OnResign()
         {
             if (online) Net?.SendPacket(Packet.Of(Op.Resign));
@@ -635,7 +939,13 @@ void StartDevHost()
 
         void OnAgain()
         {
-            if (online) { Net?.SendPacket(Packet.Of(Op.Rematch)); return; }
+            if (online)
+            {
+                showingResult = false;
+                board.ClearStamps();
+                UpdateOnlineScreen();
+                return;
+            }
             StartMatch(seats[0], seats[1], level);
         }
 

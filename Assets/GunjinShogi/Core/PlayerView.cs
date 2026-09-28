@@ -7,6 +7,8 @@ namespace GunjinShogi.Core
     {
         /// <summary>駒種が見えないことを表す値。</summary>
         public const int HiddenType = -1;
+        /// <summary>観戦者の視点。両者の駒種を受け取り、どちらを表示するかは観戦者の画面で切り替える。</summary>
+        public const int Spectator = 2;
     }
 
     public sealed class PieceView
@@ -53,7 +55,7 @@ namespace GunjinShogi.Core
         /// <summary>revealAll = true は終局後の感想戦用。</summary>
         public static PlayerView From(GameState s, int viewer, bool revealAll = false)
         {
-            bool reveal = revealAll && s.Phase == GamePhase.Finished;
+            bool reveal = (revealAll && s.Phase == GamePhase.Finished) || viewer == Spectator;
             var v = new PlayerView
             {
                 Viewer = viewer,
@@ -121,8 +123,9 @@ namespace GunjinShogi.Core
                 mv.AttackerId = b.AttackerId;
                 mv.DefenderId = b.DefenderId;
                 mv.Result = b.Result;
-                if (s.Pieces[b.AttackerId].Owner == viewer) mv.AttackerType = b.AttackerType;
-                if (s.Pieces[b.DefenderId].Owner == viewer) mv.DefenderType = b.DefenderType;
+                bool all = viewer == Visibility.Spectator;
+                if (all || s.Pieces[b.AttackerId].Owner == viewer) mv.AttackerType = b.AttackerType;
+                if (all || s.Pieces[b.DefenderId].Owner == viewer) mv.DefenderType = b.DefenderType;
             }
             return mv;
         }

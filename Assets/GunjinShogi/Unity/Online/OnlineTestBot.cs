@@ -10,8 +10,8 @@ namespace GunjinShogi.UnityView
     public enum TestBotMode { Random, CpuEasy, CpuNormal, CpuHard, Idle }
 
     /// <summary>
-    /// 開発用の対戦相手。「もう1人のクライアント」として振る舞い、
-    /// 受け取った Packet だけを頼りに配置と指し手を送る（本物のクライアントと同じ情報しか使わない）。
+    /// 開発用の対戦相手。「もう1人のクライアント」として振る舞い、受け取った Packet だけを頼りに動く。
+    /// 準備画面では空いている席に座って準備完了を押し、自分が部屋主なら2人そろった時点で開始する。
     /// </summary>
     public sealed class OnlineTestBot
     {
@@ -19,7 +19,9 @@ namespace GunjinShogi.UnityView
         readonly Random rng = new Random();
         RuleSet rules;
         BoardTopology topo;
-        int seat = -1;
+        string ruleCode;
+        int myId = -1;
+        RoomInfo room;
         PlayerView view;
         CpuPlayer cpu;
         CpuPlayer.CpuThinking thinking;
@@ -29,10 +31,10 @@ namespace GunjinShogi.UnityView
         public TestBotMode Mode;
         /// <summary>自分の番が来てから指すまでの最低待ち時間（秒）。</summary>
         public float MoveDelay = 0.6f;
-        /// <summary>相手の再戦申し込みに自動で応じる。</summary>
-        public bool AcceptRematch = true;
+        /// <summary>準備画面で自動的に着席して準備完了を押す。</summary>
+        public bool AutoReady = true;
 
-        public int Seat => seat;
+        public int Seat => room == null ? RoomInfo.NoSeat : room.SeatOf(myId);
         public string LastAction { get; private set; } = "";
 
         public OnlineTestBot(Action<Packet> send, TestBotMode mode)
@@ -46,34 +48,18 @@ namespace GunjinShogi.UnityView
             switch (p.Op)
             {
                 case Op.RoomJoined:
-                    // 再接続（同じ席）なら続きの Snapshot を待つだけ
-                    if (rules != null && seat == p.A) break;
-                    seat = p.A;
-                    RuleCodec.TryDecode(p.S2, out var o);
-                    rules = StandardRules.Create23(o);
-                    topo = new BoardTopology(rules.Board);
-                    setupSent = false;
-                    view = null;
-                    cpu = null;
+                    myId = p.A;
                     break;
-                case Op.RoomStatus:
-                    var phase = (RoomPhase)p.A;
-                    var flags = (StatusFlags)p.B;
-                    if (phase == RoomPhase.Setup && !setupSent && rules != null && Mode != TestBotMode.Idle)
+                case Op.RoomState:
+                    room = RoomInfo.Decode(p.Data);
+                    if (room.RuleCode != ruleCode)
                     {
-                        setupSent = true;
-                        view = null;
-                        cpu = IsCpu ? new CpuPlayer(rules, seat, rng.Next(), CpuSettings.For(Level)) : null;
-                        var setup = cpu != null ? cpu.ChooseSetup() : RandomSetup.Generate(rules, topo, seat, rng);
-                        send(Packet.Of(Op.SubmitSetup, s1: SetupCodec.Encode(topo, seat, setup)));
-                        LastAction = "配置を提出";
+                        ruleCode = room.RuleCode;
+                        RuleCodec.TryDecode(ruleCode, out var o);
+                        rules = StandardRules.Create23(o ?? new StandardRuleOptions());
+                        topo = new BoardTopology(rules.Board);
                     }
-                    if (AcceptRematch && phase == RoomPhase.Finished
-                        && (flags & StatusFlags.OpponentWantsRematch) != 0 && (flags & StatusFlags.IWantRematch) == 0)
-                    {
-                        send(Packet.Of(Op.Rematch));
-                        LastAction = "再戦に応じた";
-                    }
+                    OnRoom();
                     break;
                 case Op.Snapshot:
                     view = ViewCodec.Decode(p.Data);
@@ -85,6 +71,37 @@ namespace GunjinShogi.UnityView
                     thinking = null;
                     wait = MoveDelay;
                     break;
+                case Op.GameOver:
+                    view = null;
+                    break;
+            }
+        }
+
+        void OnRoom()
+        {
+            int seat = Seat;
+            if (room.Phase == RoomPhase.Lobby)
+            {
+                setupSent = false;
+                view = null;
+                if (!AutoReady || Mode == TestBotMode.Idle) return;
+                if (seat < 0)
+                {
+                    int free = room.SeatMember[1] == RoomInfo.NoSeat ? 1 : room.SeatMember[0] == RoomInfo.NoSeat ? 0 : -1;
+                    if (free >= 0) { send(Packet.Of(Op.TakeSeat, free)); LastAction = (free == 0 ? "先手" : "後手") + "席に着いた"; }
+                    return;
+                }
+                if (!room.Ready[seat]) { send(Packet.Of(Op.SetReady, 1)); LastAction = "準備完了"; return; }
+                if (room.OwnerId == myId && room.CanStart) { send(Packet.Of(Op.StartGame)); LastAction = "対局を開始した"; }
+                return;
+            }
+            if (room.Phase == RoomPhase.Setup && seat >= 0 && !room.SetupDone[seat] && !setupSent && Mode != TestBotMode.Idle)
+            {
+                setupSent = true;
+                cpu = IsCpu ? new CpuPlayer(rules, seat, rng.Next(), CpuSettings.For(Level)) : null;
+                var setup = cpu != null ? cpu.ChooseSetup() : RandomSetup.Generate(rules, topo, seat, rng);
+                send(Packet.Of(Op.SubmitSetup, s1: SetupCodec.Encode(topo, seat, setup)));
+                LastAction = "配置を提出";
             }
         }
 
@@ -94,14 +111,15 @@ namespace GunjinShogi.UnityView
         public void Tick(float dt)
         {
             if (Mode == TestBotMode.Idle) return;
-            if (view == null || view.Phase != GamePhase.Playing || view.CurrentPlayer != seat) return;
+            int seat = Seat;
+            if (view == null || seat < 0 || view.Phase != GamePhase.Playing || view.CurrentPlayer != seat) return;
             wait -= dt;
 
             if (IsCpu)
             {
-                if (cpu == null) cpu = new CpuPlayer(rules, seat, rng.Next(), CpuSettings.For(Level)); // 途中から CPU に切り替えた場合
+                if (cpu == null || cpu.Me != seat) cpu = new CpuPlayer(rules, seat, rng.Next(), CpuSettings.For(Level));
                 if (thinking == null) thinking = cpu.BeginThink(view);
-                if (!thinking.Step(8) || wait > 0) return; // 1フレームに 8ms ずつ考える
+                if (!thinking.Step(8) || wait > 0) return;
                 if (thinking.Resign)
                 {
                     send(Packet.Of(Op.Resign));

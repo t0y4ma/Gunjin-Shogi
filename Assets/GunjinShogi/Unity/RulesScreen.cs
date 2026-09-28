@@ -32,7 +32,9 @@ namespace GunjinShogi.UnityView
         StandardRuleOptions working;
         DisplaySettings display;
         bool showingDetail;
+        bool rulesEditable = true;
         Action onClose;
+        Action<StandardRuleOptions> onRulesSaved;
 
         public RulesScreen(Transform canvas)
         {
@@ -172,16 +174,25 @@ namespace GunjinShogi.UnityView
             foreach (var l in choiceLabels) l.textWrappingMode = landscape ? TextWrappingModes.NoWrap : TextWrappingModes.Normal;
         }
 
-        public void Open(Action closed)
+        public void Open(Action closed) => OpenFor(AppSettings.Rules, true, null, closed, false);
+
+        /// <summary>
+        /// rules を編集する（決定すると端末の既定ルールにも保存し、rulesSaved に渡す）。
+        /// canEditRules = false なら表示設定だけ（詳細ルールのページは出さない）。
+        /// </summary>
+        public void OpenFor(StandardRuleOptions rules, bool canEditRules, Action<StandardRuleOptions> rulesSaved, Action closed, bool startInDetail)
         {
             onClose = closed;
-            working = AppSettings.Rules;
+            onRulesSaved = rulesSaved;
+            rulesEditable = canEditRules;
+            working = RuleCodec.TryDecode(RuleCodec.Encode(rules), out var copy) ? copy : new StandardRuleOptions();
             display = AppSettings.Display;
             messageText.text = "";
             codeInput.text = "";
             root.SetActive(true);
             root.transform.SetAsLastSibling();
-            ShowPage(false);
+            navButton.gameObject.SetActive(canEditRules);
+            ShowPage(canEditRules && startInDetail);
         }
 
         void ShowPage(bool detail)
@@ -234,7 +245,11 @@ namespace GunjinShogi.UnityView
         {
             if (save)
             {
-                AppSettings.Rules = working;
+                if (rulesEditable)
+                {
+                    AppSettings.Rules = working;
+                    onRulesSaved?.Invoke(working);
+                }
                 AppSettings.Display = display;
             }
             root.SetActive(false);

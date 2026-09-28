@@ -117,6 +117,7 @@ namespace GunjinShogi.UnityView
             foreach (var p in due) p.Run();
 
             Bot?.Tick(Time.unscaledDeltaTime);
+            foreach (var b in extraBots.Values) b.Tick(Time.unscaledDeltaTime);
         }
 
         public void StartServer()
@@ -175,6 +176,12 @@ namespace GunjinShogi.UnityView
         void ServerSend(int conn, Packet p)
         {
             var bytes = p.Encode();
+            if (extraBots.TryGetValue(conn, out var extra))
+            {
+                AddLog($"サーバー → 相手役2  {Describe(p)}  {bytes.Length}B");
+                Later(() => { if (extraBots.ContainsKey(conn)) extra.Receive(Packet.Decode(bytes)); });
+                return;
+            }
             if (conn == BotConn)
             {
                 AddLog($"サーバー → 相手役  {Describe(p)}  {bytes.Length}B");
@@ -206,6 +213,31 @@ namespace GunjinShogi.UnityView
             AddLog($"相手役（{mode}）を部屋 {room} に入れる");
         }
 
+        // 観戦を試すための2人目以降の相手役（自動で着席・準備完了する）
+        readonly System.Collections.Generic.Dictionary<int, OnlineTestBot> extraBots = new System.Collections.Generic.Dictionary<int, OnlineTestBot>();
+        public int ExtraBotCount => extraBots.Count;
+
+        public void AddExtraBot(string room, TestBotMode mode)
+        {
+            if (!ServerUp || string.IsNullOrEmpty(room)) return;
+            int conn = OpenConnection();
+            var bot = new OnlineTestBot(p => { if (extraBots.ContainsKey(conn)) ClientToServer(conn, p, "相手役2"); }, mode);
+            extraBots[conn] = bot;
+            ClientToServer(conn, Packet.Of(Op.JoinRoom, Packet.ProtocolVersion, s1: "debug-extra-" + conn, s2: room,
+                data: System.Text.Encoding.UTF8.GetBytes("相手役" + (extraBots.Count + 1))), "相手役2");
+            AddLog($"相手役（{mode}）をもう1人、部屋 {room} に入れる");
+        }
+
+        public void RemoveExtraBots()
+        {
+            foreach (var conn in new System.Collections.Generic.List<int>(extraBots.Keys))
+            {
+                ClientToServer(conn, Packet.Of(Op.LeaveRoom), "相手役2");
+                ClientClosed(conn);
+            }
+            extraBots.Clear();
+        }
+
         /// <summary>相手役に部屋を作らせる（あなたが「部屋に入る」側を試すため）。部屋番号は BotRoom に入る。</summary>
         public void BotCreateRoom(TestBotMode mode, string ruleCode)
         {
@@ -214,7 +246,7 @@ namespace GunjinShogi.UnityView
             Bot = new OnlineTestBot(p => BotSend(p), mode);
             BotRoom = "";
             BotConn = OpenConnection();
-            ClientToServer(BotConn, Packet.Of(Op.CreateRoom, Packet.ProtocolVersion, s1: BotToken, s2: string.IsNullOrEmpty(ruleCode) ? "0" : ruleCode), "相手役");
+            ClientToServer(BotConn, Packet.Of(Op.CreateRoom, Packet.ProtocolVersion, 1, s1: BotToken, s2: string.IsNullOrEmpty(ruleCode) ? "0" : ruleCode, data: System.Text.Encoding.UTF8.GetBytes("相手役")), "相手役");
             AddLog($"相手役（{mode}）が部屋を作る（ルール {ruleCode}）");
         }
 
@@ -227,7 +259,7 @@ namespace GunjinShogi.UnityView
         void BotConnect()
         {
             BotConn = OpenConnection();
-            ClientToServer(BotConn, Packet.Of(Op.JoinRoom, Packet.ProtocolVersion, s1: BotToken, s2: BotRoom), "相手役");
+            ClientToServer(BotConn, Packet.Of(Op.JoinRoom, Packet.ProtocolVersion, s1: BotToken, s2: BotRoom, data: System.Text.Encoding.UTF8.GetBytes("相手役")), "相手役");
         }
 
         /// <summary>相手役の通信を切る（席は残る。再接続で戻れる）。</summary>
@@ -247,7 +279,9 @@ namespace GunjinShogi.UnityView
         }
 
         public void BotResign() => BotSend(Packet.Of(Op.Resign));
-        public void BotRematch() => BotSend(Packet.Of(Op.Rematch));
+        public void BotSetReady(bool ready) => BotSend(Packet.Of(Op.SetReady, ready ? 1 : 0));
+        public void BotTakeSeat(int seat) => BotSend(Packet.Of(Op.TakeSeat, seat));
+        public void BotAbortSetup() => BotSend(Packet.Of(Op.AbortSetup));
 
         /// <summary>相手役を部屋から退出させる（leave=true なら退出を送る。対局中なら投了扱い）。</summary>
         public void RemoveBot(bool leave = true)
@@ -287,8 +321,8 @@ namespace GunjinShogi.UnityView
             switch (p.Op)
             {
                 case Op.Move: return $"Move 駒#{p.A}→{p.B}";
-                case Op.RoomStatus: return $"RoomStatus {(RoomPhase)p.A} [{(StatusFlags)p.B}]";
-                case Op.RoomJoined: return $"RoomJoined 部屋{p.S1} 席{p.A}";
+                case Op.RoomState: return $"RoomState {p.Data.Length}B";
+                case Op.RoomJoined: return $"RoomJoined 部屋{p.S1} 参加者#{p.A}";
                 case Op.Error: return $"Error {p.S1}";
                 case Op.MoveMade: return $"MoveMade 次{p.A} 結果{p.B}";
                 default: return p.Op.ToString();

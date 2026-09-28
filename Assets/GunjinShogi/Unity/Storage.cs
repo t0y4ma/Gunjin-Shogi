@@ -42,6 +42,50 @@ namespace GunjinShogi.UnityView
         }
     }
 
+    /// <summary>
+    /// デバッグモード（Ctrl+Shift+F8）。端末の識別子と名前を保存しない使い捨てにして、
+    /// 同じ PC のタブやウィンドウごとに別の人としてオンラインの部屋に入れるようにする。
+    /// 「前の対局に戻る」の記録も保存しない。
+    /// </summary>
+    public static class DebugSession
+    {
+        public static bool Enabled { get; private set; }
+        public static string Token { get; private set; } = "";
+        public static string Tag { get; private set; } = "";
+
+        public static void Toggle()
+        {
+            Enabled = !Enabled;
+            if (!Enabled) return;
+            Tag = Guid.NewGuid().ToString("N").Substring(0, 4);
+            Token = "dbg-" + Guid.NewGuid().ToString("N");
+        }
+    }
+
+    /// <summary>オンラインでの名前（端末に保存。デバッグモードでは使い捨て）。</summary>
+    public static class PlayerName
+    {
+        const string Key = "gs.playerName";
+        static string debugName;
+
+        public static string Value
+        {
+            get
+            {
+                if (DebugSession.Enabled) return debugName ?? (debugName = "デバッグ-" + DebugSession.Tag);
+                return PlayerPrefs.GetString(Key, "");
+            }
+            set
+            {
+                value = (value ?? "").Trim();
+                if (value.Length > 12) value = value.Substring(0, 12);
+                if (DebugSession.Enabled) { debugName = value; return; }
+                PlayerPrefs.SetString(Key, value);
+                PlayerPrefs.Save();
+            }
+        }
+    }
+
     /// <summary>表示と操作の設定（対局のルールには影響しない）。</summary>
     public sealed class DisplaySettings
     {

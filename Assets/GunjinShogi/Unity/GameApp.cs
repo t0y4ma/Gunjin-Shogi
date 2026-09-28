@@ -22,7 +22,7 @@ namespace GunjinShogi.UnityView
         [SerializeField] TMP_FontAsset boldFont;
         [SerializeField] TMP_FontAsset regularFont;
 
-        static readonly string[] LevelName = { "やさしい", "ふつう", "つよい" };
+        static string[] LevelName => MatchSetupScreen.LevelName;
         static readonly string[] MemoLabels = { "将", "佐", "尉", "飛", "タ", "騎", "工", "ス", "地", "旗", "？", "消す" };
         const string HintMove = "動かす駒を選んでください。";
         const string HintSetup = "駒を2つ選ぶと入れ替わります。相手からは見えません。";
@@ -45,15 +45,8 @@ namespace GunjinShogi.UnityView
         DisplaySettings display = new DisplaySettings();
         ScrollRect logScroll;
         string cpuResignReason;
-        Button cpuStartButton;
-        Button[] levelButtons;
-        TextMeshProUGUI levelNote;
-        static readonly string[] LevelNotes =
-        {
-            "推理はざっくりで、指し手にムラがあります。取られそうな駒もあまり気にしません。はじめての人向け。",
-            "戦闘の結果と動きから相手の駒を推理し、取られそうな駒は逃がします。ルールを覚えた人向け。",
-            "推理の試行を増やしてほとんど迷わず指します。防御も固く、勝てないと見ると投了します。",
-        };
+        MatchSetupScreen matchSetup;
+        bool pendingVsCpu;
         StandardRuleOptions currentOptions;
         GameObject infoButtons;
         bool? lastLandscape;
@@ -152,6 +145,7 @@ namespace GunjinShogi.UnityView
             rulesScreen = new RulesScreen(canvasRect);
             presetPanel = new PresetPanel(canvasRect, new PlayerPrefsPresetStorage());
             info = new InfoScreens(canvasRect);
+            BuildMatchSetup();
             BuildOnline();
             ApplyOrientation(true);
         }
@@ -214,7 +208,8 @@ namespace GunjinShogi.UnityView
             setupRow = ButtonRow(content,
                 Ui.Button("Random", null, "ランダム", () => RandomizeSetup()),
                 Ui.Button("Presets", null, "保存・読込", OpenPresets),
-                Ui.Button("Confirm", null, "この配置で決定", OnConfirmSetup, Ui.ButtonStyle.Primary));
+                Ui.Button("Abort", null, "中断", OnAbortSetup, Ui.ButtonStyle.Danger),
+                Ui.Button("Confirm", null, "決定", OnConfirmSetup, Ui.ButtonStyle.Primary));
             memoButton = Ui.Button("Memo", null, "メモ", ToggleMemo);
             playRow = ButtonRow(content,
                 memoButton,
@@ -307,28 +302,8 @@ namespace GunjinShogi.UnityView
             Row(Ui.Text("Lead", col, "裏向きの駒で戦う。勝ち負けは審判だけが知っている。", 30, Theme.TextMuted, TextAlignmentOptions.Center), 56);
             Spacer(col, 8);
 
-            // CPUの強さ：3択のボタン＋説明文。対戦ボタンは1つ
-            Row(Ui.Text("LevelTitle", col, "CPUの強さ", 26, Theme.TextMuted, TextAlignmentOptions.Center, bold: true), 34);
-            var levelRow = Ui.Rect("LevelRow", col);
-            var lh = levelRow.gameObject.AddComponent<HorizontalLayoutGroup>();
-            lh.spacing = 10;
-            lh.childControlWidth = lh.childControlHeight = true;
-            lh.childForceExpandWidth = lh.childForceExpandHeight = true;
-            Ui.Size(levelRow, 64);
-            levelButtons = new Button[3];
-            for (int i = 0; i < 3; i++)
-            {
-                int lv = i;
-                levelButtons[i] = Ui.Button("Level" + i, levelRow, "CPUの強さ：" + LevelName[i], () => { AppSettings.CpuLevel = lv; RefreshTitle(); }, fontSize: 28);
-            }
-            levelNote = Ui.Text("LevelNote", col, "", 24, Theme.TextMuted, TextAlignmentOptions.Center);
-            Ui.Size(levelNote, 64);
-            Ui.AutoSize(levelNote, 24);
-            var cpuButton = Ui.Button("PlayCpu", col, "CPUと対戦", () => StartMatch(SeatKind.Human, SeatKind.Cpu, (CpuLevel)AppSettings.CpuLevel), Ui.ButtonStyle.Secondary, 36);
-            Ui.Size(cpuButton, 88);
-            cpuStartButton = cpuButton;
-            Spacer(col, 6);
-            MenuButton(col, "ふたりで対戦（1台を交互に）", () => StartMatch(SeatKind.Human, SeatKind.Human, CpuLevel.Normal), false);
+            MenuButton(col, "CPUと対戦", () => OpenMatchSetup(true), false);
+            MenuButton(col, "ふたりで対戦（1台を交互に）", () => OpenMatchSetup(false), false);
             MenuButton(col, "オンライン対戦", OpenLobby, false);
             Spacer(col, 6);
             MenuButton(col, "設定・ルール", () => rulesScreen.Open(RefreshTitle), false);
@@ -340,14 +315,30 @@ void RefreshTitle()
         {
             var o = AppSettings.Rules;
             titleRulesText.text = $"23枚型　／　ルール：{RulesScreen.Summary(o)}（コード {RuleCodec.Encode(o)}）";
-            int lv = AppSettings.CpuLevel;
-            for (int i = 0; i < levelButtons.Length; i++)
+        }
+
+        // ───────── 対局前の画面（オフライン） ─────────
+
+        void BuildMatchSetup()
+        {
+            matchSetup = new MatchSetupScreen(canvasRect);
+            matchSetup.Back = () => { matchSetup.Close(); RefreshTitle(); };
+            matchSetup.EditRules = () => rulesScreen.OpenFor(AppSettings.Rules, true, null, matchSetup.Refresh, true);
+            matchSetup.OpenDisplay = () => rulesScreen.OpenFor(AppSettings.Rules, false, null, null, false);
+            matchSetup.Start = (side, lv) =>
             {
-                Ui.SetSelected(levelButtons[i], i == lv);
-                Ui.SetLabel(levelButtons[i], LevelName[i]);
-            }
-            levelNote.text = $"<color=#E2B23C>{LevelName[lv]}</color>　{LevelNotes[lv]}";
-            Ui.SetLabel(cpuStartButton, $"CPUと対戦（{LevelName[lv]}）");
+                matchSetup.Close();
+                if (pendingVsCpu)
+                    StartMatch(side == 0 ? SeatKind.Human : SeatKind.Cpu, side == 0 ? SeatKind.Cpu : SeatKind.Human, (CpuLevel)lv);
+                else
+                    StartMatch(SeatKind.Human, SeatKind.Human, CpuLevel.Normal);
+            };
+        }
+
+        void OpenMatchSetup(bool vsCpu)
+        {
+            pendingVsCpu = vsCpu;
+            matchSetup.Open(vsCpu);
         }
 
         static void Spacer(Transform parent, float h)
@@ -421,6 +412,7 @@ void RefreshTitle()
             rulesScreen.ApplyOrientation(landscape);
             presetPanel.ApplyOrientation(landscape);
             info.ApplyOrientation(landscape);
+            matchSetup.ApplyOrientation(landscape);
             ApplyOnlineOrientation(landscape);
         }
 
@@ -435,6 +427,7 @@ void RefreshTitle()
             info.CloseAll();
             titleScreen.SetActive(true);
             handoffScreen.SetActive(false);
+            matchSetup.Close();
             SetInviteVisible(false);
             RefreshTitle();
         }
@@ -745,7 +738,7 @@ void RenderPlay()
             foreach (var p in view.Pieces)
             {
                 myMemos.TryGetValue(p.Id, out var memo);
-                list.Add(new PieceDisplay { Id = p.Id, Owner = p.Owner, Node = p.Node, TypeId = p.TypeId, HasMoved = p.HasMoved, Memo = memo });
+                list.Add(new PieceDisplay { Id = p.Id, Owner = p.Owner, Node = p.Node, TypeId = DisplayType(p), HasMoved = p.HasMoved, Memo = memo });
             }
 
             ClearMarks();
@@ -777,10 +770,17 @@ void RenderPlay()
             int limit = display.ScrollableLog ? int.MaxValue : 14;
             var sb = new StringBuilder();
             for (int i = upTo - 1, n = 0; i >= 0 && n < limit; i--, n++)
-                sb.AppendLine(MoveLog.Describe(view.History[i], view, rules));
+                sb.AppendLine(MoveLog.Describe(view.History[i], view, rules, LogHiddenOwner(view)));
             logScroll.vertical = display.ScrollableLog;
-            logScroll.verticalNormalizedPosition = 1;
+            StartCoroutine(ScrollLogToTop());
             return sb.ToString();
+        }
+
+        /// <summary>棋譜の長さが変わった後（レイアウトの更新後）に先頭（最新の手）へ戻す。</summary>
+        IEnumerator ScrollLogToTop()
+        {
+            yield return null;
+            if (logScroll != null) logScroll.verticalNormalizedPosition = 1;
         }
 
         void ShowResult()
@@ -954,6 +954,7 @@ GameState StateAt(int k)
             resultRow.SetActive(row == resultRow);
             replayRow.SetActive(row == replayRow);
             if (waitRow != null) waitRow.SetActive(row == waitRow);
+            if (spectateRow != null) spectateRow.SetActive(row == spectateRow);
             if (row != playRow && claimWinButton != null) claimWinButton.gameObject.SetActive(false);
         }
     }

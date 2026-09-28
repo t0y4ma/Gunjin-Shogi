@@ -100,6 +100,13 @@ namespace GunjinShogi.EditorTools
             }
             using (new EditorGUILayout.HorizontalScope())
             {
+                using (new EditorGUI.DisabledScope(string.IsNullOrEmpty(lb.PlayerRoom) || !lb.ServerUp))
+                    if (GUILayout.Button($"もう1人入れる（観戦の確認用・今 {lb.ExtraBotCount} 人）")) lb.AddExtraBot(lb.PlayerRoom, EditorLoopback.DefaultBotMode);
+                using (new EditorGUI.DisabledScope(lb.ExtraBotCount == 0))
+                    if (GUILayout.Button("追加の相手役を退出")) lb.RemoveExtraBots();
+            }
+            using (new EditorGUILayout.HorizontalScope())
+            {
                 botRuleCode = EditorGUILayout.TextField("相手役が作る部屋のルール", botRuleCode);
                 using (new EditorGUI.DisabledScope(!lb.ServerUp))
                     if (GUILayout.Button("相手役に部屋を作らせる", GUILayout.Width(160))) lb.BotCreateRoom(EditorLoopback.DefaultBotMode, botRuleCode);
@@ -115,13 +122,14 @@ namespace GunjinShogi.EditorTools
                     using (new EditorGUI.DisabledScope(lb.BotConn >= 0))
                         if (GUILayout.Button("再接続")) lb.ReconnectBot();
                     if (GUILayout.Button("投了")) lb.BotResign();
-                    if (GUILayout.Button("再戦を申し込む")) lb.BotRematch();
+                    if (GUILayout.Button("配置を中断")) lb.BotAbortSetup();
+                    if (GUILayout.Button("席を立つ")) lb.BotTakeSeat(-1);
                 }
                 if (bot != null)
                 {
                     bot.Mode = (TestBotMode)EditorGUILayout.EnumPopup("動き（途中で変更可）", bot.Mode);
                     bot.MoveDelay = EditorGUILayout.Slider("指すまでの待ち (秒)", bot.MoveDelay, 0, 5);
-                    bot.AcceptRematch = EditorGUILayout.Toggle("再戦に自動で応じる", bot.AcceptRematch);
+                    bot.AutoReady = EditorGUILayout.Toggle("自動で着席・準備完了（部屋主なら開始）", bot.AutoReady);
                 }
             }
 

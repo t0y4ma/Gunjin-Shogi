@@ -11,37 +11,36 @@ namespace GunjinShogi.Core.Online
     public enum Op : byte
     {
         // クライアント → サーバー
-        CreateRoom = 1,   // A=バージョン S1=端末トークン S2=ルールコード
-        JoinRoom = 2,     // A=バージョン S1=端末トークン S2=部屋番号
+        CreateRoom = 1,     // A=バージョン B=1ならオープン S1=端末トークン S2=ルールコード Data=名前(UTF-8)
+        JoinRoom = 2,       // A=バージョン S1=端末トークン S2=部屋番号 Data=名前(UTF-8)
         LeaveRoom = 3,
-        SubmitSetup = 4,  // S1=配置コード（先手の向き）
-        Move = 5,         // A=駒ID B=移動先ノード
+        SubmitSetup = 4,    // S1=配置コード（先手の向き）
+        Move = 5,           // A=駒ID B=移動先ノード
         Resign = 6,
-        Rematch = 7,
-        ClaimWin = 8,     // 相手が長く切断しているときに勝ちを申請
+        ClaimWin = 8,       // 相手が長く切断しているときに勝ちを申請
+        ListRooms = 9,      // A=バージョン S1=前に入っていた部屋番号 S2=端末トークン
+        TakeSeat = 10,      // A=0 先手席 / 1 後手席 / -1 席を立つ
+        SetReady = 11,      // A=1 準備完了 / 0 取り消し
+        SetRules = 12,      // S1=ルールコード（部屋主のみ）
+        SetVisibility = 13, // A=1 オープン / 0 プライベート（部屋主のみ）
+        TransferOwner = 14, // A=譲る相手の参加者ID（部屋主のみ）
+        StartGame = 15,     // 部屋主のみ。2人が着席して準備完了のとき
+        AbortSetup = 16,    // 配置中に着席者が中断 → 全員が準備画面へ
+        SetName = 17,       // S1=名前
 
         // サーバー → クライアント
-        Error = 100,      // S1=メッセージ A=1 なら部屋から外れた
-        RoomJoined = 101, // S1=部屋番号 S2=ルールコード A=自分の手番（0=先手）
-        RoomStatus = 102, // A=RoomPhase B=StatusFlags C=相手が切断してからの秒数
-        Snapshot = 103,   // Data=PlayerView（自分から見える情報）
-        MoveMade = 104,   // Data=MoveView A=次の手番 B=GameResult C=EndReason
-        GameOver = 105,   // Data=全公開の PlayerView S1/S2=先手・後手の配置コード A=GameResult B=EndReason
+        Error = 100,        // S1=メッセージ A=1 なら部屋から外れた
+        RoomJoined = 101,   // S1=部屋番号 A=自分の参加者ID
+        RoomState = 102,    // Data=RoomInfo（部屋の様子すべて）
+        Snapshot = 103,     // Data=PlayerView（自分から見える情報。観戦者は Viewer=2）
+        MoveMade = 104,     // Data=MoveView A=次の手番 B=GameResult C=EndReason
+        GameOver = 105,     // Data=全公開の PlayerView S1/S2=先手・後手の配置コード A=GameResult B=EndReason
+        RoomList = 106,     // Data=RoomListInfo
+        Notice = 107,       // S1=お知らせ（「○○さんが配置を中断しました」など）
     }
 
-    public enum RoomPhase : byte { Setup = 0, Playing = 1, Finished = 2 }
-
-    [Flags]
-    public enum StatusFlags
-    {
-        None = 0,
-        OpponentJoined = 1,       // 相手の席が埋まっている（切断中も含む）
-        OpponentPresent = 2,      // 相手が今つながっている
-        MySetupDone = 4,
-        OpponentSetupDone = 8,
-        IWantRematch = 16,
-        OpponentWantsRematch = 32,
-    }
+    /// <summary>部屋の段階。対局が終わると準備に戻る。</summary>
+    public enum RoomPhase : byte { Lobby = 0, Setup = 1, Playing = 2 }
 
     /// <summary>
     /// 1つのメッセージ。すべての種類で同じ入れ物を使い、使わない欄は空のまま送る。
@@ -49,7 +48,7 @@ namespace GunjinShogi.Core.Online
     /// </summary>
     public sealed class Packet
     {
-        public const int ProtocolVersion = 1;
+        public const int ProtocolVersion = 2;
 
         public Op Op;
         public int A, B, C;
