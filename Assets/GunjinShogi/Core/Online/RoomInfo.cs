@@ -10,6 +10,9 @@ namespace GunjinShogi.Core.Online
         public int Id;
         public string Name = "";
         public bool Present;
+        /// <summary>サーバーが動かす CPU（部屋主が席に座らせたもの）。</summary>
+        public bool IsCpu;
+        public int CpuLevel;
     }
 
     /// <summary>部屋の様子。変化があるたびに部屋の全員へ送る（数十〜百バイト程度）。</summary>
@@ -25,6 +28,8 @@ namespace GunjinShogi.Core.Online
         public readonly int[] SeatMember = { NoSeat, NoSeat };
         public readonly bool[] Ready = new bool[2];
         public readonly bool[] SetupDone = new bool[2];
+        /// <summary>感想戦（Review）中、その席の人が「準備画面へ」を押した（または退出・CPU）。</summary>
+        public readonly bool[] ReviewDone = new bool[2];
         /// <summary>着席者が切断してからの秒数（つながっていれば -1）。</summary>
         public readonly int[] AbsentSeconds = { -1, -1 };
         public readonly List<MemberInfo> Members = new List<MemberInfo>();
@@ -51,7 +56,7 @@ namespace GunjinShogi.Core.Online
             for (int s = 0; s < 2; s++)
             {
                 w.Int(SeatMember[s]);
-                w.Byte((byte)((Ready[s] ? 1 : 0) | (SetupDone[s] ? 2 : 0)));
+                w.Byte((byte)((Ready[s] ? 1 : 0) | (SetupDone[s] ? 2 : 0) | (ReviewDone[s] ? 4 : 0)));
                 w.Int(AbsentSeconds[s]);
             }
             w.Int(Members.Count);
@@ -59,7 +64,8 @@ namespace GunjinShogi.Core.Online
             {
                 w.Int(m.Id);
                 w.String(m.Name);
-                w.Byte((byte)(m.Present ? 1 : 0));
+                w.Byte((byte)((m.Present ? 1 : 0) | (m.IsCpu ? 2 : 0)));
+                if (m.IsCpu) w.Int(m.CpuLevel);
             }
             return w.ToArray();
         }
@@ -81,12 +87,20 @@ namespace GunjinShogi.Core.Online
                 byte f = r.Byte();
                 info.Ready[s] = (f & 1) != 0;
                 info.SetupDone[s] = (f & 2) != 0;
+                info.ReviewDone[s] = (f & 4) != 0;
                 info.AbsentSeconds[s] = r.Int();
             }
             int n = r.Int();
             if (n < 0 || n > 64) throw new FormatException("参加者の数が不正です");
             for (int i = 0; i < n; i++)
-                info.Members.Add(new MemberInfo { Id = r.Int(), Name = r.String(), Present = r.Byte() != 0 });
+            {
+                var m = new MemberInfo { Id = r.Int(), Name = r.String() };
+                byte f = r.Byte();
+                m.Present = (f & 1) != 0;
+                m.IsCpu = (f & 2) != 0;
+                if (m.IsCpu) m.CpuLevel = r.Int();
+                info.Members.Add(m);
+            }
             if (!r.AtEnd) throw new FormatException("余分なデータがあります");
             return info;
         }

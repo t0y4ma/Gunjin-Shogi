@@ -145,6 +145,7 @@ namespace GunjinShogi.UnityView
                 StartGame = () => Net?.SendPacket(Packet.Of(Op.StartGame)),
                 SetOpen = o => Net?.SendPacket(Packet.Of(Op.SetVisibility, o ? 1 : 0)),
                 TransferOwner = id => Net?.SendPacket(Packet.Of(Op.TransferOwner, id)),
+                SetSeatCpu = (seat, level) => Net?.SendPacket(Packet.Of(Op.SetSeatCpu, seat, level)),
                 EditRules = OpenRoomRules,
                 OpenDisplaySettings = () => rulesScreen.OpenFor(currentOptions ?? AppSettings.Rules, false, null, () => display = AppSettings.Display, false),
                 Rename = name =>
@@ -625,6 +626,7 @@ namespace GunjinShogi.UnityView
             switch (roomInfo.Phase)
             {
                 case RoomPhase.Lobby:
+                case RoomPhase.Review:
                     onlineSetupActive = false;
                     presetPanel.Close();
                     if (showingResult)
@@ -861,6 +863,7 @@ namespace GunjinShogi.UnityView
             selectedNode = -1;
             SetMemoMode(false);
             claimWinButton.gameObject.SetActive(false);
+            if (!resultRow.activeSelf) againButton.interactable = true;
             ShowRow(resultRow);
             RenderPlay();
             int seat = MySeat;
@@ -874,7 +877,7 @@ namespace GunjinShogi.UnityView
             if (onlineReason == EndReason.Resign) reason = "投了・退出";
             subText.text = $"{reason}（{onlineView.History.Count}手）。全ての駒を表にしています。「準備画面へ」で次の対局の準備に戻ります。";
             Ui.SetLabel(againButton, "準備画面へ");
-            againButton.interactable = true;
+            Ui.SetLabel(resultRow.transform.Find("Title").GetComponent<Button>(), "部屋を出る");
         }
 
         // ───────── 招待 ─────────
@@ -941,6 +944,8 @@ namespace GunjinShogi.UnityView
         {
             if (online)
             {
+                // 着席者が「準備画面へ」を押すと感想戦を終えたことをサーバーに伝える（2人そろうと準備段階へ）
+                if (roomInfo != null && roomInfo.Phase == RoomPhase.Review && MySeat >= 0) Net?.SendPacket(Packet.Of(Op.FinishReview));
                 showingResult = false;
                 board.ClearStamps();
                 UpdateOnlineScreen();

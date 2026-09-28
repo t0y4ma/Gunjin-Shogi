@@ -116,6 +116,7 @@ namespace GunjinShogi.UnityView
             due.Sort((a, b) => a.At != b.At ? a.At.CompareTo(b.At) : a.Seq.CompareTo(b.Seq));
             foreach (var p in due) p.Run();
 
+            service?.Tick();
             Bot?.Tick(Time.unscaledDeltaTime);
             foreach (var b in extraBots.Values) b.Tick(Time.unscaledDeltaTime);
         }

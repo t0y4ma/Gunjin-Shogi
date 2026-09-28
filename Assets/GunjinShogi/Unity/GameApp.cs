@@ -214,10 +214,11 @@ namespace GunjinShogi.UnityView
             playRow = ButtonRow(content,
                 memoButton,
                 Ui.Button("Resign", null, "投了", OnResign, Ui.ButtonStyle.Danger));
+            // 投了ボタン（右端）と同じ位置に「もう一度／準備画面へ」を置き、抜けるボタンは左端へ（押し間違いで部屋を出ないように）
             resultRow = ButtonRow(content,
-                Ui.Button("Again", null, "もう一度", OnAgain, Ui.ButtonStyle.Primary),
+                Ui.Button("Title", null, "タイトルへ", OnLeaveToTitle, Ui.ButtonStyle.Danger),
                 Ui.Button("Replay", null, "感想戦", StartReplay),
-                Ui.Button("Title", null, "タイトルへ", OnLeaveToTitle));
+                Ui.Button("Again", null, "もう一度", OnAgain, Ui.ButtonStyle.Primary));
             replayRow = ButtonRow(content,
                 Ui.Button("First", null, "|◀", () => SetReplayPly(0)),
                 Ui.Button("Prev", null, "◀", () => SetReplayPly(replayPly - 1)),
@@ -786,10 +787,11 @@ void RenderPlay()
         void ShowResult()
         {
             Ui.SetLabel(againButton, "もう一度");
-            againButton.interactable = true;
+            Ui.SetLabel(resultRow.transform.Find("Title").GetComponent<Button>(), "タイトルへ");
             inputMode = InputMode.None;
             selectedNode = -1;
             SetMemoMode(false);
+            againButton.interactable = true;
             ShowRow(resultRow);
             RenderPlay();
             string reason = MoveLog.Reason(state.EndReason);
@@ -938,6 +940,15 @@ GameState StateAt(int k)
             else if (memoMode || inputMode == InputMode.Move) MoveClick(node);
         }
 
+        IEnumerator GuardRow(GameObject row)
+        {
+            var buttons = row.GetComponentsInChildren<Button>(true);
+            var was = new bool[buttons.Length];
+            for (int i = 0; i < buttons.Length; i++) { was[i] = buttons[i].interactable; buttons[i].interactable = false; }
+            yield return new WaitForSecondsRealtime(0.7f);
+            for (int i = 0; i < buttons.Length; i++) if (buttons[i] != null && !buttons[i].interactable) buttons[i].interactable = was[i];
+        }
+
         void ClearMarks()
         {
             marks.SelectedNode = -1;
@@ -947,8 +958,12 @@ GameState StateAt(int k)
             marks.LastFrom = marks.LastTo = -1;
         }
 
+        float rowShownAt;
+
         void ShowRow(GameObject row)
         {
+            // 行が切り替わった直後は押せなくする（前の行のボタンを連打した分が新しい行に当たらないように）
+            if (row != null && !row.activeSelf) { rowShownAt = Time.unscaledTime; StartCoroutine(GuardRow(row)); }
             setupRow.SetActive(row == setupRow);
             playRow.SetActive(row == playRow);
             resultRow.SetActive(row == resultRow);

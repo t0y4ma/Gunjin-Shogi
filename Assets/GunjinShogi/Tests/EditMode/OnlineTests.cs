@@ -126,7 +126,14 @@ namespace GunjinShogi.Core.Tests
             var over = h.Last(3, Op.GameOver);
             Assert.IsNotNull(over, "観戦者にも終局が届く");
             Assert.AreEqual(23, over.S1.Length);
-            Assert.AreEqual(RoomPhase.Lobby, h.Room(1).Phase, "終局後は準備画面に戻る");
+            // 終局後は感想戦：席は固定され、観戦者は座れない
+            Assert.AreEqual(RoomPhase.Review, h.Room(1).Phase);
+            h.Send(3, Packet.Of(Op.TakeSeat, 0));
+            Assert.AreEqual(RoomInfo.NoSeat, h.Seat(3), "感想戦中は座れない");
+            h.Send(1, Packet.Of(Op.FinishReview));
+            Assert.AreEqual(RoomPhase.Review, h.Room(1).Phase, "相手がまだ感想戦中");
+            h.Send(2, Packet.Of(Op.FinishReview));
+            Assert.AreEqual(RoomPhase.Lobby, h.Room(1).Phase, "2人とも終えたら準備に戻る");
             Assert.IsFalse(h.Room(1).Ready[0] || h.Room(1).Ready[1]);
             Assert.AreEqual(0, h.Seat(1), "席はそのまま");
         }
@@ -240,6 +247,9 @@ namespace GunjinShogi.Core.Tests
             var over = h.Last(1, Op.GameOver);
             Assert.IsNotNull(over);
             Assert.AreEqual((int)GameResult.Player0Win, over.A);
+            Assert.AreEqual(RoomPhase.Review, h.Room(1).Phase);
+            h.Send(1, Packet.Of(Op.FinishReview));
+            Assert.AreEqual(RoomPhase.Lobby, h.Room(1).Phase, "切断中の相手は感想戦を終えた扱い");
             Assert.AreEqual(1, h.Room(1).Members.Count, "切断したままの対局者は外れる");
         }
 
@@ -287,6 +297,55 @@ namespace GunjinShogi.Core.Tests
             int p0 = h.Views[1].Pieces.FindIndex(p => p.Owner == 0 && p.Alive);
             h.Send(3, Packet.Of(Op.Move, p0, 0));
             Assert.AreEqual(0, h.Views[1].History.Count, "観戦者は指せない");
+        }
+
+        [Test]
+        public void CpuSeat_PlaysOnServer_AndOnlyOwnerCanPlaceIt()
+        {
+            var h = new Harness();
+            h.Send(1, Create("tokenA"));
+            string room = h.Last(1, Op.RoomJoined).S1;
+            h.Send(2, Join("tokenB", room));
+            h.Send(2, Packet.Of(Op.SetSeatCpu, 1, 1));
+            Assert.AreEqual("部屋主だけができる操作です", h.Last(2, Op.Error).S1);
+
+            h.Send(1, Packet.Of(Op.SetSeatCpu, 1, 0));
+            var cpu = h.Room(1).Member(h.Room(1).SeatMember[1]);
+            Assert.IsTrue(cpu.IsCpu);
+            Assert.AreEqual(0, cpu.CpuLevel);
+            Assert.IsTrue(h.Room(1).Ready[1], "CPU は常に準備完了");
+            h.Send(1, Packet.Of(Op.SetSeatCpu, 1, 2));
+            Assert.AreEqual(2, h.Room(1).Member(h.Room(1).SeatMember[1]).CpuLevel, "強さを変えられる");
+
+            h.Send(1, Packet.Of(Op.SetReady, 1));
+            h.Send(1, Packet.Of(Op.StartGame));
+            Assert.AreEqual(RoomPhase.Setup, h.Room(1).Phase);
+            Assert.IsTrue(h.Room(1).SetupDone[1], "CPU は開始と同時に配置を出す");
+            var rng = new Random(11);
+            h.Send(1, Packet.Of(Op.SubmitSetup, s1: RandomSetupCode(StandardRules.Create23(), 0, rng)));
+            Assert.AreEqual(RoomPhase.Playing, h.Room(1).Phase);
+
+            // 人が指す → サーバーの Tick で CPU が指し返す
+            var rules = StandardRules.Create23();
+            for (int turn = 0; turn < 6 && h.Views[1].Phase == GamePhase.Playing; turn++)
+            {
+                var moves = h.Views[1].ToMoveState(rules, new BoardTopology(rules.Board)).GetLegalMoves();
+                var m = moves[rng.Next(moves.Count)];
+                h.Send(1, Packet.Of(Op.Move, m.PieceId, m.ToNode));
+                int before = h.Views[1].History.Count;
+                for (int i = 0; i < 400 && h.Views[1].History.Count == before && h.Views[1].Phase == GamePhase.Playing; i++)
+                {
+                    h.Now += 0.05;
+                    h.Server.Tick();
+                }
+                if (h.Views[1].Phase == GamePhase.Playing) Assert.AreEqual(0, h.Views[1].CurrentPlayer, "CPU が指し返した");
+            }
+
+            // 部屋主が抜けても、CPU は部屋主にならない（人が残っていれば人へ、人がいなければ部屋は閉じる）
+            h.Send(1, Packet.Of(Op.LeaveRoom));
+            Assert.IsFalse(h.Room(2).Member(h.Room(2).OwnerId).IsCpu);
+            h.Server.Disconnected(2);
+            Assert.AreEqual(0, h.Server.RoomCount, "CPU だけの部屋は閉じる");
         }
 
         [Test]

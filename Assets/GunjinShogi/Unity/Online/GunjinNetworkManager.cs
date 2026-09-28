@@ -82,11 +82,22 @@ namespace GunjinShogi.UnityView
             base.OnStartServer();
             service = new RoomService(SendToClient, () => Time.unscaledTimeAsDouble);
             NetworkServer.RegisterHandler<GsPacketMessage>(OnServerPacket, false);
+            StartCoroutine(TickService());
             if (Utils.IsHeadless())
             {
                 // ターン制なので高いフレームレートは要らない（VMのCPUを節約）
                 Application.targetFrameRate = 15;
                 Debug.Log($"[Gunjin] サーバー起動 ポート {serverPort}");
+            }
+        }
+
+        /// <summary>席に座った CPU を毎フレーム少しずつ考えさせる。</summary>
+        System.Collections.IEnumerator TickService()
+        {
+            while (NetworkServer.active && service != null)
+            {
+                service.Tick();
+                yield return null;
             }
         }
 

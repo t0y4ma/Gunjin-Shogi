@@ -19,6 +19,7 @@ namespace GunjinShogi.UnityView
         public Action StartGame;
         public Action<bool> SetOpen;
         public Action<int> TransferOwner;
+        public Action<int, int> SetSeatCpu;     // 席, 強さ（-1 で外す）
         public Action EditRules;                // 部屋主：変更 / それ以外：確認
         public Action OpenDisplaySettings;
         public Action<string> Rename;
@@ -41,7 +42,7 @@ namespace GunjinShogi.UnityView
         {
             public Image Frame;
             public TextMeshProUGUI Title, Name, State;
-            public Button Action;
+            public Button Action, Cpu;
         }
 
         public bool IsOpen => root.activeSelf;
@@ -82,7 +83,7 @@ namespace GunjinShogi.UnityView
             h.spacing = 18;
             h.childControlWidth = h.childControlHeight = true;
             h.childForceExpandWidth = h.childForceExpandHeight = true;
-            Ui.Size(seatsRow, 250);
+            Ui.Size(seatsRow, 290);
             for (int s = 0; s < 2; s++) seats[s] = BuildSeat(seatsRow, s);
 
             // 参加者
@@ -152,8 +153,14 @@ namespace GunjinShogi.UnityView
             Ui.Size(card.State, 34);
             var spacer = Ui.Size(Ui.Rect("Spacer", col));
             spacer.flexibleHeight = 1;
-            card.Action = Ui.Button("Action", col, "", () => OnSeatAction(seat), fontSize: 26);
-            Ui.Size(card.Action, 64);
+            var buttons = Ui.Rect("Buttons", col);
+            var bh = buttons.gameObject.AddComponent<HorizontalLayoutGroup>();
+            bh.spacing = 10;
+            bh.childControlWidth = bh.childControlHeight = true;
+            bh.childForceExpandWidth = bh.childForceExpandHeight = true;
+            Ui.Size(buttons, 60);
+            card.Action = Ui.Button("Action", buttons, "", () => OnSeatAction(seat), fontSize: 24);
+            card.Cpu = Ui.Button("Cpu", buttons, "", () => OnCpuAction(seat), fontSize: 24);
             return card;
         }
 
@@ -204,9 +211,19 @@ namespace GunjinShogi.UnityView
             SetReady?.Invoke(!info.Ready[s]);
         }
 
+        void OnCpuAction(int seat)
+        {
+            if (info == null || !IsOwner) return;
+            var m = info.Member(info.SeatMember[seat]);
+            if (m == null) SetSeatCpu?.Invoke(seat, AppSettings.CpuLevel);
+            else if (m.IsCpu) SetSeatCpu?.Invoke(seat, (m.CpuLevel + 1) % RoomService.CpuLevelNames.Length); // 強さを順に切り替え
+        }
+
         void OnSeatAction(int seat)
         {
             if (info == null) return;
+            var occupant = info.Member(info.SeatMember[seat]);
+            if (occupant != null && occupant.IsCpu && IsOwner) { SetSeatCpu?.Invoke(seat, -1); return; }
             if (MySeat == seat) TakeSeat?.Invoke(RoomInfo.NoSeat);
             else TakeSeat?.Invoke(seat);
         }
@@ -242,18 +259,29 @@ namespace GunjinShogi.UnityView
                 {
                     c.Name.text = (id == room.OwnerId ? "<color=#E3B341>★</color> " : "") + m.Name + (mine ? "<size=70%>（あなた）</size>" : "");
                     c.State.text = !m.Present ? "<color=#E0705A>切断中</color>"
+                        : room.Phase == RoomPhase.Review ? (room.ReviewDone[s] ? "感想戦を終えました" : "感想戦中")
                         : room.Phase == RoomPhase.Setup ? (room.SetupDone[s] ? "配置済み" : "配置中")
                         : room.Phase == RoomPhase.Playing ? "対局中"
                         : room.Ready[s] ? "<color=#8FBF7A>準備完了</color>" : "準備中";
                 }
                 string label;
                 bool enabled = lobby;
+                bool cpuSeat = m != null && m.IsCpu;
                 if (mine) label = "席を立つ（観戦へ）";
+                else if (cpuSeat && owner) label = "CPUを外す";
                 else if (m == null) label = "ここに座る";
                 else if (owner) label = mySeat >= 0 ? "席を入れ替える" : "代わりに座る";
                 else { label = "着席中"; enabled = false; }
                 Ui.SetLabel(c.Action, label);
                 c.Action.interactable = enabled;
+                // 部屋主だけ：空席に CPU を座らせる・座っている CPU の強さを切り替える
+                bool showCpu = owner && (m == null || cpuSeat);
+                c.Cpu.gameObject.SetActive(showCpu);
+                if (showCpu)
+                {
+                    Ui.SetLabel(c.Cpu, cpuSeat ? $"強さ：{RoomService.CpuLevelNames[m.CpuLevel]} ›" : "CPUを座らせる");
+                    c.Cpu.interactable = lobby;
+                }
             }
 
             // 参加者一覧
@@ -284,6 +312,9 @@ namespace GunjinShogi.UnityView
         {
             if (room.Phase == RoomPhase.Setup) return mySeat >= 0 ? "配置中です" : "対局者が駒を配置しています。対局が始まると観戦できます。";
             if (room.Phase == RoomPhase.Playing) return "対局中です";
+            if (room.Phase == RoomPhase.Review)
+                return mySeat >= 0 && room.ReviewDone[mySeat] ? "相手が感想戦を終えるのを待っています。終わると席を移ったり次の対局を始めたりできます。"
+                    : "対局者が感想戦をしています。終わると席を移ったり次の対局を始めたりできます。";
             if (!room.BothSeated) return "先手席と後手席に1人ずつ座ってください。座っていない人は観戦になります。";
             if (!(room.Ready[0] && room.Ready[1])) return mySeat >= 0 && !room.Ready[mySeat] ? "準備ができたら「準備完了」を押してください。" : "対局者の準備完了を待っています。";
             if (!room.CanStart) return "対局者の接続を待っています。";
@@ -297,13 +328,13 @@ namespace GunjinShogi.UnityView
             var h = Ui.RowGroup(row, 10);
             h.padding = new RectOffset(14, 8, 4, 4);
             int seat = room.SeatOf(m.Id);
-            string role = seat == 0 ? "先手" : seat == 1 ? "後手" : "観戦";
+            string role = (seat == 0 ? "先手" : seat == 1 ? "後手" : "観戦") + (m.IsCpu ? "・CPU" : "");
             string text = $"{(m.Id == room.OwnerId ? "<color=#E3B341>★</color>" : "　")} {m.Name}{(m.Id == myId ? "（あなた）" : "")}　<color=#A39D88>{role}{(m.Present ? "" : "・切断中")}{(m.Id == room.OwnerId ? "・部屋主" : "")}</color>";
             var t = Ui.Text("Name", row.transform, text, 24, Theme.Text);
             t.textWrappingMode = TextWrappingModes.NoWrap;
             Ui.AutoSize(t, 24);
             Ui.Size(t, -1, 300, 1);
-            if (owner && m.Id != myId && m.Present)
+            if (owner && m.Id != myId && m.Present && !m.IsCpu)
             {
                 int id = m.Id;
                 var give = Ui.Button("Give", row.transform, "部屋主を譲る", () => TransferOwner?.Invoke(id), fontSize: 22);

@@ -27,6 +27,8 @@ namespace GunjinShogi.Core.Online
         StartGame = 15,     // 部屋主のみ。2人が着席して準備完了のとき
         AbortSetup = 16,    // 配置中に着席者が中断 → 全員が準備画面へ
         SetName = 17,       // S1=名前
+        SetSeatCpu = 18,    // A=席 B=CPUの強さ(0〜2)、-1 で CPU を外す（部屋主のみ・対局前）
+        FinishReview = 19,  // 終局後の感想戦を終えて準備画面へ（着席者全員がそろうと準備段階に戻る）
 
         // サーバー → クライアント
         Error = 100,        // S1=メッセージ A=1 なら部屋から外れた
@@ -39,8 +41,8 @@ namespace GunjinShogi.Core.Online
         Notice = 107,       // S1=お知らせ（「○○さんが配置を中断しました」など）
     }
 
-    /// <summary>部屋の段階。対局が終わると準備に戻る。</summary>
-    public enum RoomPhase : byte { Lobby = 0, Setup = 1, Playing = 2 }
+    /// <summary>部屋の段階。対局が終わると感想戦（Review）を経て準備（Lobby）に戻る。</summary>
+    public enum RoomPhase : byte { Lobby = 0, Setup = 1, Playing = 2, Review = 3 }
 
     /// <summary>
     /// 1つのメッセージ。すべての種類で同じ入れ物を使い、使わない欄は空のまま送る。
@@ -48,7 +50,7 @@ namespace GunjinShogi.Core.Online
     /// </summary>
     public sealed class Packet
     {
-        public const int ProtocolVersion = 2;
+        public const int ProtocolVersion = 3;
 
         public Op Op;
         public int A, B, C;

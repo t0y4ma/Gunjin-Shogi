@@ -95,6 +95,12 @@ namespace GunjinShogi.UnityView
                 if (room.OwnerId == myId && room.CanStart) { send(Packet.Of(Op.StartGame)); LastAction = "対局を開始した"; }
                 return;
             }
+            if (room.Phase == RoomPhase.Review && seat >= 0 && !room.ReviewDone[seat] && Mode != TestBotMode.Idle)
+            {
+                send(Packet.Of(Op.FinishReview));
+                LastAction = "感想戦を終えた";
+                return;
+            }
             if (room.Phase == RoomPhase.Setup && seat >= 0 && !room.SetupDone[seat] && !setupSent && Mode != TestBotMode.Idle)
             {
                 setupSent = true;
