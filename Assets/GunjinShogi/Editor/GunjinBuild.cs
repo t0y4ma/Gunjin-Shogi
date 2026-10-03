@@ -25,13 +25,58 @@ namespace GunjinShogi.EditorTools
         static string[] Scenes => EditorBuildSettings.scenes.Where(s => s.enabled).Select(s => s.path).ToArray();
 
         [MenuItem("軍人将棋/ビルド/サーバー（Linux .x86_64）")]
-        public static void BuildServerMenu() => Run(server: true, web: false);
+        public static void BuildServerMenu() => Request(server: true, web: false);
 
         [MenuItem("軍人将棋/ビルド/クライアント（WebGL）")]
-        public static void BuildWebGLMenu() => Run(server: false, web: true);
+        public static void BuildWebGLMenu() => Request(server: false, web: true);
 
         [MenuItem("軍人将棋/ビルド/両方（サーバー＋WebGL）")]
-        public static void BuildBothMenu() => Run(server: true, web: true);
+        public static void BuildBothMenu() => Request(server: true, web: true);
+
+        // ───── Linux への切り替えを挟んだビルド ─────
+        // Linux サーバーの IL2CPP ビルドは、作業ターゲットが Linux になっていないと「No Linux sysroot found」で失敗する。
+        // そこで、まず Linux に切り替え、再コンパイルが終わって少し待ってからビルドする（切り替えでドメインが読み直されても続きから動く）。
+        const string PendingKey = "GunjinBuild.Pending";   // "server,web"
+        const string ResumeAtKey = "GunjinBuild.ResumeAt";
+        const double SettleSeconds = 20;
+
+        /// <summary>メニューからのビルド。サーバーを作るときは先に Linux に切り替えてから始める。</summary>
+        public static void Request(bool server, bool web)
+        {
+            if (!server || EditorUserBuildSettings.activeBuildTarget == BuildTarget.StandaloneLinux64)
+            {
+                Run(server, web);
+                return;
+            }
+            SessionState.SetString(PendingKey, (server ? "1" : "0") + "," + (web ? "1" : "0"));
+            SessionState.SetFloat(ResumeAtKey, (float)(EditorApplication.timeSinceStartup + SettleSeconds));
+            Debug.Log("[GunjinBuild] 作業ターゲットを Linux に切り替えてからビルドします（切り替えと再コンパイルで少しかかります）");
+            EditorUserBuildSettings.SwitchActiveBuildTarget(BuildTargetGroup.Standalone, BuildTarget.StandaloneLinux64);
+            WatchPending();
+        }
+
+        [InitializeOnLoadMethod]
+        static void WatchPending()
+        {
+            EditorApplication.update -= ResumeWhenReady;
+            if (string.IsNullOrEmpty(SessionState.GetString(PendingKey, ""))) return;
+            // 切り替え後の読み直しから数えて少し待つ（ツールチェーンの準備が終わるのを待つ）
+            SessionState.SetFloat(ResumeAtKey, (float)(EditorApplication.timeSinceStartup + SettleSeconds));
+            EditorApplication.update += ResumeWhenReady;
+        }
+
+        static void ResumeWhenReady()
+        {
+            var pending = SessionState.GetString(PendingKey, "");
+            if (string.IsNullOrEmpty(pending)) { EditorApplication.update -= ResumeWhenReady; return; }
+            if (EditorApplication.isCompiling || EditorApplication.isUpdating || EditorApplication.isPlayingOrWillChangePlaymode) return;
+            if (EditorUserBuildSettings.activeBuildTarget != BuildTarget.StandaloneLinux64) return;
+            if (EditorApplication.timeSinceStartup < SessionState.GetFloat(ResumeAtKey, 0)) return;
+            EditorApplication.update -= ResumeWhenReady;
+            SessionState.EraseString(PendingKey);
+            var parts = pending.Split(',');
+            Run(parts[0] == "1", parts.Length > 1 && parts[1] == "1");
+        }
 
         /// <summary>ビルドして、最後に作業ターゲットを元に戻す。結果は Library/GunjinBuild/last-result.txt にも書く。</summary>
         public static bool Run(bool server, bool web)

@@ -309,6 +309,9 @@ namespace GunjinShogi.Core
             };
             c.setupDone[0] = setupDone[0];
             c.setupDone[1] = setupDone[1];
+            // 配置中に複製しても、提出済みの配置を引き継ぐ（写さないともう一方の提出で例外になる）
+            for (int p = 0; p < 2; p++)
+                if (pendingSetups[p] != null) c.pendingSetups[p] = new List<Placement>(pendingSetups[p]);
             foreach (var p in Pieces) c.Pieces.Add(p.Clone());
             return c;
         }

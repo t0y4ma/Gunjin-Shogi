@@ -36,7 +36,8 @@ namespace GunjinShogi.UnityView
         int viewer;
         RectTransform boardRoot;
         internal RectTransform cellLayer, markLayer, pieceLayer, fxLayer;
-        Image boardFrame, river;
+        Image boardFrame, river, trail, trailFrom;
+        int trailFromNode = -1, trailToNode = -1;
         readonly List<Image> bridges = new List<Image>();
         readonly List<NodeCell> cells = new List<NodeCell>();
         readonly List<PieceView> pieces = new List<PieceView>();
@@ -77,6 +78,10 @@ namespace GunjinShogi.UnityView
             markLayer = Ui.Stretch(Ui.Rect("Marks", boardRoot));
             pieceLayer = Ui.Stretch(Ui.Rect("Pieces", boardRoot));
             fxLayer = Ui.Stretch(Ui.Rect("Fx", boardRoot));
+            // 直前の手の軌跡（動いた元→先を結ぶ線と、元の小さな丸）。駒の下に描く
+            trail = Ui.Image("LastMoveTrail", markLayer, Theme.WithAlpha(Theme.Brass, 0.75f));
+            trailFrom = Ui.Image("LastMoveFrom", markLayer, Theme.WithAlpha(Theme.Brass, 0.9f));
+            trail.enabled = trailFrom.enabled = false;
 
             foreach (var g in rules.Board.GateColumns)
                 bridges.Add(Ui.Image("Bridge" + g, boardRoot, Theme.Bridge));
@@ -126,6 +131,21 @@ namespace GunjinShogi.UnityView
                 cells[n].Layout(r, cell);
             }
             foreach (var p in pieces) p.Snap();
+            LayoutTrail();
+        }
+
+        void LayoutTrail()
+        {
+            bool on = trailFromNode >= 0 && trailToNode >= 0 && trailFromNode != trailToNode && cell >= 4;
+            trail.enabled = trailFrom.enabled = on;
+            if (!on) return;
+            var a = NodeRect(trailFromNode).center;
+            var b = NodeRect(trailToNode).center;
+            var d = b - a;
+            Ui.Place(trail.rectTransform, (a + b) * 0.5f, new Vector2(d.magnitude, Mathf.Max(3, cell * 0.09f)));
+            trail.rectTransform.localRotation = Quaternion.Euler(0, 0, Mathf.Atan2(d.y, d.x) * Mathf.Rad2Deg);
+            Ui.Place(trailFrom.rectTransform, a, Vector2.one * Mathf.Max(6, cell * 0.22f));
+            trailFrom.rectTransform.localRotation = Quaternion.Euler(0, 0, 45);
         }
 
         int DisplayX(int x) => viewer == 0 ? x : rules.Board.Width - 1 - x;
@@ -183,10 +203,14 @@ namespace GunjinShogi.UnityView
                     if (marks.AttackTargets.Contains(n)) kind = MarkKind.Attack;
                     else if (marks.MoveTargets.Contains(n)) kind = MarkKind.Move;
                 }
-                bool last = marks != null && (marks.LastFrom == n || marks.LastTo == n);
+                var last = marks == null ? NodeCell.LastMark.None
+                    : marks.LastTo == n ? NodeCell.LastMark.To
+                    : marks.LastFrom == n ? NodeCell.LastMark.From : NodeCell.LastMark.None;
                 bool dim = marks != null && marks.Dimmed.Contains(n);
                 cells[n].SetState(kind, last, dim);
             }
+            trailFromNode = marks?.LastFrom ?? -1;
+            trailToNode = marks?.LastTo ?? -1;
             lastSize = Vector2.zero; // 次のフレームで位置を確定
         }
 

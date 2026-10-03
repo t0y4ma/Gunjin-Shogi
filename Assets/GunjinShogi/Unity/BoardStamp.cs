@@ -9,7 +9,9 @@ namespace GunjinShogi.UnityView
         RectTransform rt;
         CanvasGroup group;
         float age;
-        const float Life = 1.5f;
+        const float Life = 1.4f;
+        /// <summary>ハンコの大きさ（マスに対する割合）。駒と動きが見えるよう小さめにする。</summary>
+        const float Size = 0.44f;
 
         internal static BoardStamp Create(Transform parent, Vector2 center, float cell, BoardView.StampKind kind)
         {
@@ -26,16 +28,18 @@ namespace GunjinShogi.UnityView
             s.group = frame.gameObject.AddComponent<CanvasGroup>();
             s.group.blocksRaycasts = false;
             s.group.interactable = false;
-            Ui.Place(s.rt, center, Vector2.one * cell * 0.86f);
+            // 駒を隠さないよう、マスの右上に小さく押す
+            float size = cell * Size;
+            Ui.Place(s.rt, center + new Vector2(cell * 0.5f - size * 0.42f, cell * 0.5f - size * 0.42f), Vector2.one * size);
             s.rt.localRotation = Quaternion.Euler(0, 0, -9);
             var inner = Ui.Image("Inner", frame.transform, Theme.WithAlpha(Theme.PieceLabel, 0.9f));
-            Ui.Stretch(inner.rectTransform, cell * 0.05f, cell * 0.05f, cell * 0.05f, cell * 0.05f);
+            Ui.Stretch(inner.rectTransform, size * 0.06f, size * 0.06f, size * 0.06f, size * 0.06f);
             var fill = Ui.Image("Fill", inner.transform, color);
-            Ui.Stretch(fill.rectTransform, cell * 0.025f, cell * 0.025f, cell * 0.025f, cell * 0.025f);
-            var t = Ui.Text("Text", fill.transform, text, cell * 0.5f, Theme.PieceLabel, TextAlignmentOptions.Center, bold: true);
+            Ui.Stretch(fill.rectTransform, size * 0.03f, size * 0.03f, size * 0.03f, size * 0.03f);
+            var t = Ui.Text("Text", fill.transform, text, size * 0.6f, Theme.PieceLabel, TextAlignmentOptions.Center, bold: true);
             Ui.Stretch(t.rectTransform, 2, 2, 2, 2);
             t.textWrappingMode = TextWrappingModes.NoWrap;
-            Ui.AutoSize(t, cell * (text.Length > 1 ? 0.34f : 0.52f));
+            Ui.AutoSize(t, size * (text.Length > 1 ? 0.4f : 0.62f));
             s.Tick();
             return s;
         }
@@ -44,7 +48,7 @@ namespace GunjinShogi.UnityView
         {
             age += Time.unscaledDeltaTime;
             float pop = Mathf.Clamp01(age / 0.14f);
-            rt.localScale = Vector3.one * Mathf.Lerp(1.7f, 1f, 1 - (1 - pop) * (1 - pop));
+            rt.localScale = Vector3.one * Mathf.Lerp(1.35f, 1f, 1 - (1 - pop) * (1 - pop));
             group.alpha = age < Life - 0.35f ? Mathf.Clamp01(age / 0.08f) : Mathf.Clamp01((Life - age) / 0.35f);
             return age < Life;
         }

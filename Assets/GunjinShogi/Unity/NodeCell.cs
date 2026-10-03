@@ -37,7 +37,7 @@ namespace GunjinShogi.UnityView
             c.dot.rectTransform.localRotation = Quaternion.Euler(0, 0, 45);
             c.frame = new Image[4];
             for (int i = 0; i < 4; i++) c.frame[i] = Ui.Image("Frame" + i, board.markLayer, Theme.Brass);
-            c.SetState(MarkKind.None, false, false);
+            c.SetState(MarkKind.None, LastMark.None, false);
             return c;
         }
 
@@ -64,11 +64,22 @@ namespace GunjinShogi.UnityView
             Ui.Place(frame[3].rectTransform, new Vector2(inner.xMax - t / 2, inner.center.y), new Vector2(t, inner.height));
         }
 
-        internal void SetState(MarkKind kind, bool isLast, bool dim)
+        internal enum LastMark { None, From, To }
+
+        /// <summary>
+        /// 印の表示。直前の手は、動いた先（To）を濃い塗り＋枠、動いた元（From）を薄い塗りで示す。
+        /// </summary>
+        internal void SetState(MarkKind kind, LastMark lastMark, bool dim)
         {
             dot.enabled = kind == MarkKind.Move;
-            foreach (var f in frame) f.enabled = kind == MarkKind.Attack;
-            last.enabled = isLast;
+            bool lastTo = lastMark == LastMark.To && kind == MarkKind.None;
+            foreach (var f in frame)
+            {
+                f.enabled = kind == MarkKind.Attack || lastTo;
+                f.color = kind == MarkKind.Attack ? Theme.Brass : Theme.WithAlpha(Theme.Brass, 0.95f);
+            }
+            last.enabled = lastMark != LastMark.None;
+            last.color = Theme.WithAlpha(Theme.Brass, lastMark == LastMark.To ? 0.42f : 0.2f);
             face.color = Color.Lerp(label != null ? Theme.PaperHq : Theme.Paper, Theme.Grid, dim ? 0.35f : 0f);
         }
 

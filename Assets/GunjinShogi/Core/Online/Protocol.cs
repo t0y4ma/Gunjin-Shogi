@@ -29,6 +29,7 @@ namespace GunjinShogi.Core.Online
         SetName = 17,       // S1=名前
         SetSeatCpu = 18,    // A=席 B=CPUの強さ(0〜2)、-1 で CPU を外す（部屋主のみ・対局前）
         FinishReview = 19,  // 終局後の感想戦を終えて準備画面へ（着席者全員がそろうと準備段階に戻る）
+        SetupDraft = 20,    // S1=配置中の並び（観戦者に見せるため。対局相手には送らない）
 
         // サーバー → クライアント
         Error = 100,        // S1=メッセージ A=1 なら部屋から外れた
@@ -39,6 +40,7 @@ namespace GunjinShogi.Core.Online
         GameOver = 105,     // Data=全公開の PlayerView S1/S2=先手・後手の配置コード A=GameResult B=EndReason
         RoomList = 106,     // Data=RoomListInfo
         Notice = 107,       // S1=お知らせ（「○○さんが配置を中断しました」など）
+        SetupView = 108,    // 観戦者へ：A=席 B=1なら決定済み S1=その席の並び
     }
 
     /// <summary>部屋の段階。対局が終わると感想戦（Review）を経て準備（Lobby）に戻る。</summary>
@@ -50,7 +52,7 @@ namespace GunjinShogi.Core.Online
     /// </summary>
     public sealed class Packet
     {
-        public const int ProtocolVersion = 3;
+        public const int ProtocolVersion = 4;
 
         public Op Op;
         public int A, B, C;

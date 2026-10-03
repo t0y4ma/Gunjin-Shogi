@@ -250,7 +250,9 @@ namespace GunjinShogi.Core.Tests
             Assert.AreEqual(RoomPhase.Review, h.Room(1).Phase);
             h.Send(1, Packet.Of(Op.FinishReview));
             Assert.AreEqual(RoomPhase.Lobby, h.Room(1).Phase, "切断中の相手は感想戦を終えた扱い");
-            Assert.AreEqual(1, h.Room(1).Members.Count, "切断したままの対局者は外れる");
+            Assert.IsFalse(h.Room(1).BothSeated, "切断したままの対局者は席から外れる（部屋にはしばらく残る）");
+            h.Now += RoomService.KeepAwaySeconds + 1; h.Server.Tick();
+            Assert.AreEqual(1, h.Room(1).Members.Count, "長く戻らないと部屋からも外れる");
         }
 
         [Test]
@@ -366,6 +368,119 @@ namespace GunjinShogi.Core.Tests
             Assert.IsNotNull(info.Member(human), "部屋からは追い出さない");
             Assert.IsFalse(info.Ready[0], "席が変わったので準備完了は取り直し");
             Assert.IsTrue(info.Ready[1]);
+        }
+
+        [Test]
+        public void OwnerWhoDisconnects_GetsOwnershipBackOnReturn()
+        {
+            var h = new Harness();
+            h.Send(1, Create("tokenA"));
+            string room = h.Last(1, Op.RoomJoined).S1;
+            h.Send(2, Join("tokenB", room));
+            int b = h.MemberId[2];
+            h.Send(1, Packet.Of(Op.TransferOwner, b));
+            Assert.AreEqual(b, h.Room(1).OwnerId);
+
+            // 観戦中の部屋主のタブが切れる（裏に回したなど）→ すぐには部屋主は移らない
+            h.Server.Disconnected(2);
+            h.Now += 5; h.Server.Tick();
+            Assert.AreEqual(b, h.Room(1).OwnerId, "少しの切断では部屋主はそのまま");
+            // しばらく戻らない → つながっている人に預ける
+            h.Now += RoomService.OwnerGraceSeconds; h.Server.Tick();
+            Assert.AreEqual(h.MemberId[1], h.Room(1).OwnerId, "戻らないと一時的に預ける");
+            // 同じ端末で戻る → 同じ参加者として戻り、部屋主も戻る
+            h.Send(3, Join("tokenB", room));
+            Assert.AreEqual(b, h.MemberId[3], "同じ参加者として戻る");
+            Assert.AreEqual(b, h.Room(1).OwnerId, "部屋主が戻る");
+            Assert.AreEqual(2, h.Room(1).Members.Count);
+
+            // 長く戻らない人は部屋から外れる
+            h.Server.Disconnected(3);
+            h.Now += RoomService.KeepAwaySeconds + 1; h.Server.Tick();
+            Assert.AreEqual(1, h.Room(1).Members.Count);
+            Assert.AreEqual(h.MemberId[1], h.Room(1).OwnerId);
+        }
+
+        [Test]
+        public void SpectatorsSeeSetupInProgress_OpponentDoesNot()
+        {
+            var h = new Harness();
+            var rng = new Random(5);
+            h.Send(1, Create("tokenA"));
+            string room = h.Last(1, Op.RoomJoined).S1;
+            h.Send(2, Join("tokenB", room));
+            h.Send(2, Packet.Of(Op.TakeSeat, 1));
+            h.Send(3, Join("tokenC", room));
+            h.Send(1, Packet.Of(Op.SetReady, 1));
+            h.Send(2, Packet.Of(Op.SetReady, 1));
+            h.Send(1, Packet.Of(Op.StartGame));
+            var rules = StandardRules.Create23();
+
+            string draft = RandomSetupCode(rules, 1, rng);
+            h.Send(2, Packet.Of(Op.SetupDraft, s1: draft));
+            var seen = h.Last(3, Op.SetupView);
+            Assert.IsNotNull(seen, "観戦者には配置中の並びが届く");
+            Assert.AreEqual(1, seen.A);
+            Assert.AreEqual(0, seen.B, "まだ決定していない");
+            Assert.AreEqual(draft, seen.S1);
+            Assert.IsNull(h.Last(1, Op.SetupView), "対局相手には届かない");
+
+            // 配置中に入ってきた観戦者にも、今の並びが届く
+            h.Send(4, Join("tokenD", room));
+            Assert.AreEqual(draft, h.Last(4, Op.SetupView).S1);
+
+            // 決定したら B=1
+            string final = RandomSetupCode(rules, 1, rng);
+            h.Send(2, Packet.Of(Op.SubmitSetup, s1: final));
+            Assert.AreEqual(1, h.Last(3, Op.SetupView).B);
+            Assert.IsNull(h.Last(1, Op.SetupView), "対局相手には決定後も届かない");
+        }
+
+        [Test]
+        public void PlayerWhoReturnsDuringReview_GetsTheResult()
+        {
+            var h = new Harness();
+            string room = StartGame(h, new Random(9));
+            h.Server.Disconnected(2);           // 後手が切断
+            h.Send(1, Packet.Of(Op.Resign));     // その間に先手が投了 → 感想戦
+            Assert.AreEqual(RoomPhase.Review, h.Room(1).Phase);
+            h.Send(3, Join("tokenB", room));     // 後手が戻る
+            var over = h.Last(3, Op.GameOver);
+            Assert.IsNotNull(over, "感想戦中に戻った対局者にも結果が届く");
+            Assert.AreEqual((int)GameResult.Player1Win, over.A);
+        }
+
+        [Test]
+        public void SetupStallsAreUndone_WhenAPlayerNeverReturns()
+        {
+            var h = new Harness();
+            h.Send(1, Create("tokenA"));
+            string room = h.Last(1, Op.RoomJoined).S1;
+            h.Send(2, Join("tokenB", room));
+            h.Send(2, Packet.Of(Op.TakeSeat, 1));
+            h.Send(1, Packet.Of(Op.SetReady, 1));
+            h.Send(2, Packet.Of(Op.SetReady, 1));
+            h.Send(1, Packet.Of(Op.StartGame));
+            h.Server.Disconnected(2);
+            h.Now += 5; h.Server.Tick();
+            Assert.AreEqual(RoomPhase.Setup, h.Room(1).Phase, "少しの切断なら待つ");
+            h.Now += RoomService.ClaimWinAfterSeconds; h.Server.Tick();
+            Assert.AreEqual(RoomPhase.Lobby, h.Room(1).Phase, "長く戻らなければ配置を中断する");
+            Assert.AreEqual(RoomInfo.NoSeat, h.Room(1).SeatMember[1]);
+        }
+
+        [Test]
+        public void GameState_CloneDuringSetup_KeepsSubmittedSetup()
+        {
+            var rules = StandardRules.Create23();
+            var topo = new BoardTopology(rules.Board);
+            var rng = new Random(2);
+            var s = new GameState(rules);
+            CollectionAssert.IsEmpty(s.SubmitSetup(0, RandomSetup.Generate(rules, topo, 0, rng)));
+            var c = s.Clone();
+            CollectionAssert.IsEmpty(c.SubmitSetup(1, RandomSetup.Generate(rules, topo, 1, rng)));
+            Assert.AreEqual(GamePhase.Playing, c.Phase);
+            Assert.AreEqual(GamePhase.Setup, s.Phase, "複製元は変わらない");
         }
 
         [Test]

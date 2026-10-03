@@ -589,6 +589,7 @@ void RefreshTitle()
             for (int n = 0; n < topo.NodeCount; n++)
                 if (topo.CampOf(n) != setupPlayer) marks.Dimmed.Add(n);
             board.Render(list, marks);
+            if (online) draftDirty = true; // 観戦者に配置の様子を送る
         }
 
         void SetupClick(int node)

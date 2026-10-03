@@ -227,7 +227,7 @@ namespace GunjinShogi.Core.Ai
             {
                 var n = (int[])nodes.Clone();
                 Count(PositionKey(n, view.CurrentPlayer));
-                for (int i = view.History.Count - 1; i > 0; i--)
+                for (int i = view.History.Count - 1; i >= 0; i--) // 最初の手も巻き戻して、開始局面まで数える
                 {
                     var h = view.History[i];
                     if (h.HadBattle) break;

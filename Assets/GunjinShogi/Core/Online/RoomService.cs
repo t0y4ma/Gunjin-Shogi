@@ -22,6 +22,13 @@ namespace GunjinShogi.Core.Online
         public const int MaxMembers = 10;
         public const int MaxNameLength = 12;
         public static readonly string[] CpuLevelNames = { "やさしい", "ふつう", "つよい" };
+        /// <summary>
+        /// 部屋主が切断してから、ほかの人に部屋主を一時的に預けるまでの秒数。
+        /// ブラウザは裏に回したタブの動きを止めるので、観戦中に切れてもよいようにする。戻れば部屋主も戻る。
+        /// </summary>
+        public const double OwnerGraceSeconds = 30;
+        /// <summary>切断した人を部屋に残しておく秒数（この間に同じ端末で戻れば、同じ参加者として続けられる）。</summary>
+        public const double KeepAwaySeconds = 600;
         /// <summary>CPU が指すまでの最低の間（すぐ指すと相手が盤面を追えない）。</summary>
         const double CpuMinThinkSeconds = 0.6;
 
@@ -57,8 +64,11 @@ namespace GunjinShogi.Core.Online
             public readonly bool[] Ready = new bool[2];
             public readonly bool[] ReviewDone = new bool[2];
             public readonly string[] SetupCode = new string[2];
+            public readonly string[] Draft = new string[2];       // 配置中の並び（観戦者にだけ見せる）
             public readonly List<Member> Members = new List<Member>();
             public int NextId;
+            /// <summary>切断したために部屋主を預けている人（戻ったら部屋主に戻す）。</summary>
+            public int AwayOwnerId = -1;
 
             public Member Find(int id) => Members.Find(m => m.Id == id);
             public Member ByConn(int conn) => Members.Find(m => m.Conn == conn);
@@ -130,6 +140,7 @@ namespace GunjinShogi.Core.Online
                 case Op.Resign: Resign(conn); break;
                 case Op.ClaimWin: ClaimWin(conn); break;
                 case Op.FinishReview: FinishReview(conn); break;
+                case Op.SetupDraft: SetupDraft(conn, p); break;
                 default: Error(conn, "不明な要求です"); break;
             }
         }
@@ -141,10 +152,40 @@ namespace GunjinShogi.Core.Online
         {
             foreach (var room in new List<Room>(rooms.Values))
             {
+                if (CheckAway(room)) continue;
                 if (room.Phase != RoomPhase.Playing || room.State == null) continue;
+                try { TickCpu(room); }
+                catch (Exception)
+                {
+                    // この部屋の CPU の思考で例外が出ても、ほかの部屋を止めない。その手番は合法手を代わりに指す
+                    CpuFallback(room);
+                }
+            }
+        }
+
+        void CpuFallback(Room room)
+        {
+            try
+            {
+                if (room.Phase != RoomPhase.Playing || room.State == null || room.State.Phase != GamePhase.Playing) return;
                 int seat = room.State.CurrentPlayer;
                 var m = room.SeatMember(seat);
-                if (m == null || !m.Cpu) continue;
+                if (m == null || !m.Cpu) return;
+                m.Thinking = null;
+                m.Brain = null;
+                var moves = room.State.GetLegalMoves();
+                if (moves.Count > 0) ApplyAndBroadcast(room, moves[rng.Next(moves.Count)]);
+                else { room.State.Resign(seat); FinishGame(room); }
+            }
+            catch (Exception) { }
+        }
+
+        void TickCpu(Room room)
+        {
+            {
+                int seat = room.State.CurrentPlayer;
+                var m = room.SeatMember(seat);
+                if (m == null || !m.Cpu) return;
                 if (m.Brain == null || m.Brain.Me != seat)
                     m.Brain = new CpuPlayer(room.Rules, seat, rng.Next(), CpuSettings.For((CpuLevel)m.Level));
                 if (m.Thinking == null)
@@ -152,8 +193,8 @@ namespace GunjinShogi.Core.Online
                     m.Thinking = m.Brain.BeginThink(PlayerView.From(room.State, seat));
                     m.ThinkStart = clock();
                 }
-                if (!m.Thinking.Step(15)) continue;
-                if (clock() - m.ThinkStart < CpuMinThinkSeconds) continue;
+                if (!m.Thinking.Step(15)) return;
+                if (clock() - m.ThinkStart < CpuMinThinkSeconds) return;
                 var t = m.Thinking;
                 m.Thinking = null;
                 if (t.Resign)
@@ -164,6 +205,45 @@ namespace GunjinShogi.Core.Online
                 }
                 else ApplyAndBroadcast(room, t.Result);
             }
+        }
+
+        /// <summary>
+        /// 切断中の人の扱い。部屋主は OwnerGraceSeconds 後にほかの人へ預け、KeepAwaySeconds 後に部屋から外す
+        /// （配置・対局中の対局者は外さない。勝ちの申請で決着する）。部屋を閉じたら true。
+        /// </summary>
+        bool CheckAway(Room room)
+        {
+            bool changed = false;
+            double now = clock();
+            foreach (var m in room.Members.ToArray())
+            {
+                if (m.Cpu || m.Online) continue;
+                double away = now - m.LeftAt;
+                if (m.Id == room.OwnerId && away >= OwnerGraceSeconds && room.Members.Exists(x => x.Online && !x.Cpu))
+                {
+                    room.AwayOwnerId = m.Id;
+                    PassOwnership(room);
+                    changed = true;
+                }
+                // 配置中に対局者が長く戻らないときは、配置を中断して準備に戻す（部屋が進まなくなるのを防ぐ）
+                if (room.Phase == RoomPhase.Setup && room.SeatOf(m.Id) >= 0 && away >= ClaimWinAfterSeconds)
+                {
+                    BackToLobby(room);
+                    NoticeAll(room, $"{m.Name}さんの接続が切れたままなので、配置を中断しました");
+                    changed = true;
+                }
+                bool playing = room.SeatOf(m.Id) >= 0 && (room.Phase == RoomPhase.Setup || room.Phase == RoomPhase.Playing);
+                if (away >= KeepAwaySeconds && !playing)
+                {
+                    RemoveMember(room, m);
+                    if (room.AwayOwnerId == m.Id) room.AwayOwnerId = -1;
+                    changed = true;
+                }
+            }
+            if (!changed) return false;
+            if (!room.AnyOnline) { CloseRoom(room); return true; }
+            BroadcastState(room);
+            return false;
         }
 
         // ───────── 部屋に入る・出る ─────────
@@ -247,6 +327,13 @@ namespace GunjinShogi.Core.Online
                 roomOfConn[conn] = room;
                 var name = NameFrom(p);
                 if (name.Length > 0) same.Name = name;
+                if (room.AwayOwnerId == same.Id)
+                {
+                    // 切断中に預けていた部屋主を戻す
+                    room.OwnerId = same.Id;
+                    room.AwayOwnerId = -1;
+                    NoticeAll(room, $"{same.Name}さんが戻ったので、部屋主に戻りました");
+                }
                 Welcome(room, same);
                 BroadcastState(room);
                 return;
@@ -266,6 +353,9 @@ namespace GunjinShogi.Core.Online
             send(m.Conn, Packet.Of(Op.RoomJoined, a: m.Id, s1: room.Code));
             send(m.Conn, Packet.Of(Op.RoomState, data: Info(room).Encode()));
             if (room.Phase == RoomPhase.Playing) SendSnapshot(room, m);
+            if (room.Phase == RoomPhase.Review) SendGameOver(room, m); // 感想戦中に戻った人（切断中に終局した対局者など）にも結果を届ける
+            if (room.Phase == RoomPhase.Setup && room.SeatOf(m.Id) < 0)
+                for (int s = 0; s < 2; s++) SendSetupView(room, s, m);
         }
 
         void Leave(int conn, bool voluntary)
@@ -276,11 +366,13 @@ namespace GunjinShogi.Core.Online
             if (m == null) return;
             int seat = room.SeatOf(m.Id);
 
-            if (seat >= 0 && !voluntary && (room.Phase == RoomPhase.Setup || room.Phase == RoomPhase.Playing))
+            if (!voluntary)
             {
-                // 配置・対局中の切断：席（と提出済みの配置）を残して戻ってくるのを待つ
+                // 切断（再読み込み・裏に回したタブ・通信の途切れ）：席・部屋主・提出済みの配置を残して戻ってくるのを待つ。
+                // 部屋主はしばらくしても戻らなければほかの人に預け、長く戻らなければ部屋から外す（CheckAway）。
                 m.Conn = -1;
                 m.LeftAt = clock();
+                if (seat >= 0 && room.Phase == RoomPhase.Lobby) room.Ready[seat] = false;
             }
             else if (seat >= 0 && room.Phase == RoomPhase.Playing)
             {
@@ -466,6 +558,7 @@ namespace GunjinShogi.Core.Online
             var target = room.Find(p.A);
             if (target == null || target.Cpu || !target.Online || target == m) { Error(conn, "その人には譲れません"); return; }
             room.OwnerId = target.Id;
+            room.AwayOwnerId = -1; // 自分で譲ったら、預けていた部屋主は戻さない
             BroadcastState(room);
             NoticeAll(room, $"{target.Name}さんが部屋主になりました");
         }
@@ -520,6 +613,7 @@ namespace GunjinShogi.Core.Online
             if (!Info(room).CanStart) { Error(conn, "2人が着席して準備完了になると開始できます"); return; }
             room.State = new GameState(room.Rules);
             room.SetupCode[0] = room.SetupCode[1] = null;
+            room.Draft[0] = room.Draft[1] = null;
             room.Phase = RoomPhase.Setup;
             // CPU は開始と同時に配置を出す
             for (int s = 0; s < 2; s++)
@@ -530,7 +624,10 @@ namespace GunjinShogi.Core.Online
                 m.Thinking = null;
                 var placements = m.Brain.ChooseSetup();
                 if (room.State.SubmitSetup(s, placements).Count == 0)
+                {
                     room.SetupCode[s] = SetupCodec.Encode(room.State.Topology, s, placements);
+                    SendSetupView(room, s);
+                }
             }
             AfterSetupChanged(room);
         }
@@ -549,11 +646,15 @@ namespace GunjinShogi.Core.Online
             room.Phase = RoomPhase.Lobby;
             room.State = null;
             room.SetupCode[0] = room.SetupCode[1] = null;
+            room.Draft[0] = room.Draft[1] = null;
             room.ReviewDone[0] = room.ReviewDone[1] = false;
             ResetReady(room);
-            // 戻ってこなかった対局者は外す
-            foreach (var m in room.Members.ToArray())
-                if (!m.Present) RemoveMember(room, m);
+            // 戻ってこなかった対局者は席から外す（部屋には残し、戻れば観戦として続けられる）
+            for (int s = 0; s < 2; s++)
+            {
+                var sm = room.SeatMember(s);
+                if (sm != null && !sm.Present) { room.Seat[s] = RoomInfo.NoSeat; room.Ready[s] = false; }
+            }
         }
 
         // ───────── 対局 ─────────
@@ -576,7 +677,34 @@ namespace GunjinShogi.Core.Online
             var errors = room.State.SubmitSetup(seat, placements);
             if (errors.Count > 0) { Error(conn, errors[0]); return; }
             room.SetupCode[seat] = SetupCodec.Encode(room.State.Topology, seat, placements);
+            SendSetupView(room, seat);
             AfterSetupChanged(room);
+        }
+
+        /// <summary>配置中の並び（対局者から）。観戦者にだけ中継する。</summary>
+        void SetupDraft(int conn, Packet p)
+        {
+            if (!TrySeat(conn, out var room, out int seat)) return;
+            if (room.Phase != RoomPhase.Setup || room.SetupCode[seat] != null) return;
+            if (string.IsNullOrEmpty(p.S1) || p.S1.Length > 400 || p.S1 == room.Draft[seat]) return;
+            if (SetupCodec.Decode(room.Rules, room.State.Topology, seat, p.S1) == null) return;
+            room.Draft[seat] = p.S1;
+            SendSetupView(room, seat);
+        }
+
+        /// <summary>観戦者（to を指定すればその人だけ）に、その席の今の並びを送る。対局者には送らない。</summary>
+        void SendSetupView(Room room, int seat, Member to = null)
+        {
+            bool done = room.SetupCode[seat] != null;
+            string code = room.SetupCode[seat] ?? room.Draft[seat];
+            if (code == null) return;
+            var packet = Packet.Of(Op.SetupView, seat, done ? 1 : 0, s1: code);
+            foreach (var m in room.Members)
+            {
+                if (!m.Online || room.SeatOf(m.Id) >= 0) continue;
+                if (to != null && m != to) continue;
+                send(m.Conn, packet);
+            }
         }
 
         /// <summary>配置が出そろっていれば対局を始め、全員に盤面を送る。</summary>
@@ -643,13 +771,7 @@ namespace GunjinShogi.Core.Online
         void FinishGame(Room room)
         {
             var state = room.State;
-            foreach (var m in room.Members)
-            {
-                if (!m.Online) continue;
-                var view = PlayerView.From(state, ViewerOf(room, m), revealAll: true);
-                send(m.Conn, Packet.Of(Op.GameOver, (int)state.Result, (int)state.EndReason,
-                    s1: room.SetupCode[0] ?? "", s2: room.SetupCode[1] ?? "", data: ViewCodec.Encode(view)));
-            }
+            foreach (var m in room.Members) SendGameOver(room, m);
             room.Phase = RoomPhase.Review;
             room.ReviewDone[0] = room.ReviewDone[1] = false;
             foreach (var m in room.Members) m.Thinking = null;
@@ -726,6 +848,16 @@ namespace GunjinShogi.Core.Online
         {
             var data = Info(room).Encode();
             foreach (var m in room.Members) if (m.Online) send(m.Conn, Packet.Of(Op.RoomState, data: data));
+        }
+
+        /// <summary>終局の結果（全公開の盤面と両者の配置）を送る。</summary>
+        void SendGameOver(Room room, Member m)
+        {
+            var state = room.State;
+            if (m == null || !m.Online || state == null || state.Phase != GamePhase.Finished) return;
+            var view = PlayerView.From(state, ViewerOf(room, m), revealAll: true);
+            send(m.Conn, Packet.Of(Op.GameOver, (int)state.Result, (int)state.EndReason,
+                s1: room.SetupCode[0] ?? "", s2: room.SetupCode[1] ?? "", data: ViewCodec.Encode(view)));
         }
 
         void SendSnapshot(Room room, Member m)

@@ -34,6 +34,11 @@ namespace GunjinShogi.UnityView
         EndReason onlineReason;
         float opponentLeftAt = -1;      // 相手の対局者が切断した時刻（つながっていれば -1）
         int spectatorShow = 2;          // 観戦者の表示：0=先手のみ 1=後手のみ 2=両方
+        readonly string[] specSetup = new string[2];   // 観戦中：各席の配置中の並び
+        readonly bool[] specSetupDone = new bool[2];
+        bool draftDirty;                 // 対局者：配置を動かした（観戦者向けに送る）
+        float nextDraftAt;
+        string lastDraftSent;
 
         // 通信
         IGameConnection net;
@@ -48,6 +53,7 @@ namespace GunjinShogi.UnityView
 
         // 画面
         GameObject lobbyRoot, waitRow, spectateRow;
+        ConfirmDialog confirm;
         TextMeshProUGUI lobbyStatus, lobbyMessage, lobbyListNote, debugBadge;
         TMP_InputField lobbyCodeInput, lobbyNameInput;
         Button lobbyCreate, lobbyJoin, lobbyRejoin, lobbyDev, lobbyOpenButton, lobbyPrivateButton;
@@ -421,6 +427,7 @@ namespace GunjinShogi.UnityView
         {
             CheckDebugHotkey();
             roomScreen?.Tick();
+            SendDraftIfChanged();
 
             if (reconnecting && Time.unscaledTime >= reconnectAt && Net != null && !Net.IsConnecting && !Net.IsClientConnected)
             {
@@ -485,6 +492,7 @@ namespace GunjinShogi.UnityView
             {
                 case Op.Error: OnServerError(p); break;
                 case Op.Notice: OnNotice(p.S1); break;
+                case Op.SetupView: OnSetupView(p); break;
                 case Op.RoomJoined: OnRoomJoined(p); break;
                 case Op.RoomState: OnRoomState(p); break;
                 case Op.Snapshot: OnSnapshot(ViewCodec.Decode(p.Data)); break;
@@ -600,6 +608,12 @@ namespace GunjinShogi.UnityView
             int seat = MySeat;
             opponentLeftAt = seat >= 0 && info.AbsentSeconds[1 - seat] >= 0 ? NetClock.Now - info.AbsentSeconds[1 - seat] : -1;
 
+            if (info.Phase != RoomPhase.Setup)
+            {
+                specSetup[0] = specSetup[1] = null;
+                specSetupDone[0] = specSetupDone[1] = false;
+                lastDraftSent = null;
+            }
             bool newGame = info.Phase == RoomPhase.Setup && (prev == null || prev.Phase != RoomPhase.Setup);
             if (newGame)
             {
@@ -639,7 +653,7 @@ namespace GunjinShogi.UnityView
                     break;
 
                 case RoomPhase.Setup:
-                    if (seat < 0) { ShowRoomScreen(); break; }
+                    if (seat < 0) { ShowSpectateSetup(); break; }
                     roomScreen.Hide();
                     if (!roomInfo.SetupDone[seat])
                     {
@@ -812,7 +826,66 @@ namespace GunjinShogi.UnityView
         {
             spectatorShow = spectatorShow == 2 ? 0 : spectatorShow == 0 ? 1 : 2;
             RefreshSpectateToggle();
-            RenderPlay();
+            if (roomInfo != null && roomInfo.Phase == RoomPhase.Setup) RenderSpectateSetup();
+            else RenderPlay();
+        }
+
+        // ───────── 配置中の観戦 ─────────
+
+        void OnSetupView(Packet p)
+        {
+            if (!online || p.A < 0 || p.A > 1) return;
+            specSetup[p.A] = p.S1;
+            specSetupDone[p.A] = p.B != 0;
+            if (roomInfo != null && roomInfo.Phase == RoomPhase.Setup && IsSpectator) ShowSpectateSetup();
+        }
+
+        /// <summary>観戦者：対局者が配置している様子を盤に出す。</summary>
+        void ShowSpectateSetup()
+        {
+            roomScreen.Hide();
+            onlineSetupActive = false;
+            inputMode = InputMode.None;
+            selectedNode = -1;
+            presetPanel.Close();
+            if (viewer != 0) { viewer = 0; board.SetViewer(0); }
+            ShowRow(spectateRow);
+            RefreshSpectateToggle();
+            statusText.text = "観戦中　配置中";
+            string State(int s) => specSetupDone[s] || roomInfo.SetupDone[s] ? "決定しました" : specSetup[s] != null ? "配置しています" : "配置を始めています";
+            subText.text = $"先手：{State(0)}　後手：{State(1)}";
+            logText.text = "";
+            RenderSpectateSetup();
+        }
+
+        void RenderSpectateSetup()
+        {
+            if (rules == null || topo == null) return;
+            var list = new List<PieceDisplay>();
+            for (int s = 0; s < 2; s++)
+            {
+                if (specSetup[s] == null) continue;
+                var placements = SetupCodec.Decode(rules, topo, s, specSetup[s]);
+                if (placements == null) continue;
+                bool show = spectatorShow == 2 || spectatorShow == s;
+                for (int i = 0; i < placements.Count; i++)
+                    list.Add(new PieceDisplay { Id = s * 100 + i, Owner = s, Node = placements[i].Node, TypeId = show ? placements[i].TypeId : Visibility.HiddenType });
+            }
+            ClearMarks();
+            board.Render(list, marks);
+        }
+
+        /// <summary>対局者：配置中の並びを、変わったときだけ（最短 0.5 秒おきに）観戦者向けに送る。</summary>
+        void SendDraftIfChanged()
+        {
+            if (!draftDirty || Time.unscaledTime < nextDraftAt) return;
+            draftDirty = false;
+            if (!online || !onlineSetupActive || inputMode != InputMode.Setup || Net == null || !Net.IsClientConnected || setupPlacements == null) return;
+            var code = SetupCodec.Encode(topo, setupPlayer, setupPlacements);
+            if (code == lastDraftSent) return;
+            lastDraftSent = code;
+            nextDraftAt = Time.unscaledTime + 0.5f;
+            Net.SendPacket(Packet.Of(Op.SetupDraft, s1: code));
         }
 
         void RefreshSpectateToggle()
@@ -903,6 +976,7 @@ namespace GunjinShogi.UnityView
 
         void LeaveOnline()
         {
+            confirm?.Close();
             leavingOnline = true;
             reconnecting = false;
             if (Net != null && Net.IsClientConnected) Net.SendPacket(Packet.Of(Op.LeaveRoom));
@@ -955,7 +1029,13 @@ namespace GunjinShogi.UnityView
 
         void OnLeaveToTitle()
         {
-            if (online) LeaveOnline();
+            if (online)
+            {
+                // 対局後の画面からは誤って出ないように確かめる
+                confirm ??= new ConfirmDialog(canvasRect);
+                confirm.ApplyOrientation(Screen.width >= Screen.height);
+                confirm.Show("部屋を出ますか？", "部屋から出てタイトルに戻ります。この対局の盤面や感想戦は見られなくなります。", "部屋を出る", LeaveOnline);
+            }
             else ShowTitle();
         }
     }
